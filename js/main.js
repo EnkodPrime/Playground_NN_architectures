@@ -1,11 +1,15 @@
 /* main.js — application state, UI wiring and the training loop. */
 
 const state = {
+  arch: 'cnn',                 // 'cnn' | 'rnn'
   classes: ['clean', 'ripple', 'harm', 'spike'],
   layers: [
     { filters: 4, kernel: 5, pool: true },
     { filters: 4, kernel: 5, pool: true },
   ],
+  rnnLayers: [{ units: 8, bidir: false }],
+  cell: 'gru',
+  readout: 'mean',
   activation: 'relu',
   head: 'gap',
   lr: 0.003,
@@ -85,14 +89,29 @@ function probeInfo() {
 }
 
 /* ------------------------------------------------------------- model */
+/** The layer list of whichever architecture is active. */
+function archLayers() {
+  return state.arch === 'cnn' ? state.layers : state.rnnLayers;
+}
+
 function rebuildModel() {
-  model = new ConvNet1D({
-    layers: JSON.parse(JSON.stringify(state.layers)),
-    activation: state.activation,
-    head: state.head,
-    nClasses: activeClasses().length,
-    inputLen: WIN,
-  });
+  if (state.arch === 'cnn') {
+    model = new ConvNet1D({
+      layers: JSON.parse(JSON.stringify(state.layers)),
+      activation: state.activation,
+      head: state.head,
+      nClasses: activeClasses().length,
+      inputLen: WIN,
+    });
+  } else {
+    model = new RNNNet({
+      cell: state.cell,
+      layers: JSON.parse(JSON.stringify(state.rnnLayers)),
+      readout: state.readout,
+      nClasses: activeClasses().length,
+      inputLen: WIN,
+    });
+  }
   // the selection may point at a filter that no longer exists
   if (state.selected && state.selected.type === 'filter') {
     const st = model.stages[state.selected.layer];
@@ -102,8 +121,24 @@ function rebuildModel() {
   hTrain = []; hTest = [];
   lastMetrics = null;
   $('paramCount').textContent = model.paramCount().toLocaleString('en-US') + ' parameters';
-  $('layCount').textContent = state.layers.length;
+  $('layCount').textContent = archLayers().length;
   buildLayerControls();
+}
+
+/** Switches between the convolutional and the recurrent playground. */
+function setArch(arch) {
+  if (state.arch === arch) return;
+  state.arch = arch;
+  state.selected = null;
+  document.body.className = 'arch-' + arch;
+  $('archCnn').classList.toggle('on', arch === 'cnn');
+  $('archRnn').classList.toggle('on', arch === 'rnn');
+  $('layerLbl').textContent = arch === 'cnn' ? 'Convolutional layers' : 'Recurrent layers';
+  setStream(false);
+  ood.cal = null; ood.stats = null;
+  wm.last = null; wm.sweep = null;
+  rebuildModel();
+  evaluate(); renderMetrics(); renderOodPanel(true); renderWmPanel(); renderNet(); renderMath(true);
 }
 
 /* ------------------------------------------------------ training loop */
@@ -341,6 +376,41 @@ function drawInspector(probs, oodInfo) {
   const title = (s, y) => { ctx.fillStyle = '#7b8794'; ctx.font = '600 10px system-ui,sans-serif'; ctx.fillText(s, 0, y); };
 
   const h0 = state.hover;
+  if (h0 && h0.type === 'filter' && model.kind === 'rnn') {
+    const st = model.stages[h0.layer];
+    const iw = model.unitInputWeights(h0.layer, h0.ch);
+    const names = GATE_NAMES[st.kind];
+    const back = st.bidir && h0.ch >= st.units;
+    title('INPUT WEIGHTS PER GATE' + (back ? ' · BACKWARD UNIT' : ''), 10);
+    const rowH = Math.min(22, 74 / iw.rows.length);
+    iw.rows.forEach((row, g) => {
+      const y = 14 + g * rowH;
+      ctx.fillStyle = '#98a2ad';
+      ctx.font = '9px system-ui,sans-serif';
+      ctx.fillText(names[g][0], 0, y + rowH / 2 + 3);
+      drawKernel(ctx, 14, y, w - 16, rowH - 3, row, 0, row.length);
+    });
+    title('HIDDEN STATE h(t) OVER THE WINDOW', 108);
+    if (st.snapshot) {
+      let sc = 1e-6;
+      for (let i = 0; i < st.snapshot.length; i++) sc = Math.max(sc, Math.abs(st.snapshot[i]));
+      drawWave(ctx, 0, 112, w, 52, st.snapshot, h0.ch * st.L, st.L, sc);
+    }
+    let mn = Infinity, mx = -Infinity;
+    if (st.snapshot) {
+      for (let t = 0; t < st.L; t++) {
+        const v = st.snapshot[h0.ch * st.L + t];
+        mn = Math.min(mn, v); mx = Math.max(mx, v);
+      }
+    }
+    txt.innerHTML = '<b>Layer ' + (h0.layer + 1) + ', unit ' + (h0.ch + 1) + '</b> · ' +
+      st.kind.toUpperCase() + ' · ' + iw.rows.length + ' gate' + (iw.rows.length > 1 ? 's' : '') +
+      ' × ' + iw.rows[0].length + ' input channel' + (iw.rows[0].length > 1 ? 's' : '') +
+      (back ? ' · reads the window backwards' : '') +
+      '<br>State range over the window: ' + n3(mn) + ' … ' + n3(mx) +
+      '<br>Unlike a convolution, this unit sees <b>everything up to t</b>, not a fixed window.';
+    return;
+  }
   if (h0 && h0.type === 'filter') {
     const st = model.stages[h0.layer];
     const conv = st.conv;
@@ -519,9 +589,183 @@ function renderMathInner(host) {
       'value goes next.</p>';
     return;
   }
-  if (sel.type === 'filter') renderFilterMath(host, title, slider, sel);
+  if (sel.type === 'filter') {
+    if (model.kind === 'rnn') renderUnitMath(host, title, slider, sel);
+    else renderFilterMath(host, title, slider, sel);
+  }
   else if (sel.type === 'input') renderInputMath(host, title, slider);
   else renderOutputMath(host, title, slider);
+}
+
+const GATE_NAMES = {
+  rnn: [['h', 'tanh']],
+  gru: [['z', 'σ'], ['r', 'σ'], ['n', 'tanh']],
+  lstm: [['i', 'σ'], ['f', 'σ'], ['o', 'σ'], ['g', 'tanh']],
+};
+
+/* ------------------------------------------------------- recurrent unit */
+function renderUnitMath(host, title, slider, sel) {
+  const li = sel.layer, unit = sel.ch;
+  const st = model.stages[li];
+  if (!st || unit >= st.C) { state.selected = null; return renderMathInner(host); }
+
+  slider.disabled = false;
+  slider.max = WIN - 1;
+  const t = Math.min(state.tPos, WIN - 1);
+  state.tPos = t;
+  slider.value = t;
+  $('tposVal').textContent = 't = ' + t + '  (' + (t / SR * 1000).toFixed(2) + ' ms)';
+
+  const d = model.stepDetail(li, unit, t);
+  const dirTxt = d.back ? ' (backward unit — reads the window right to left)' : '';
+  title.textContent = 'Layer ' + (li + 1) + ' · unit ' + (unit + 1) + ' · step t = ' + t +
+    ' · ' + d.kind.toUpperCase() + dirTxt;
+
+  const gates = GATE_NAMES[d.kind];
+  let html = '';
+
+  /* --- 1. the recurrence --- */
+  const formulas = {
+    rnn: 'h<sub>t</sub> = tanh( W<sub>x</sub>·x<sub>t</sub> + W<sub>h</sub>·h<sub>t−1</sub> + b )',
+    gru: 'z = σ(·) &nbsp; r = σ(·) &nbsp; n = tanh( W<sub>n</sub>x<sub>t</sub> + r ⊙ (U<sub>n</sub>h<sub>t−1</sub>) + b<sub>n</sub> ) ' +
+         '&nbsp;→&nbsp; h<sub>t</sub> = (1−z)⊙n + z⊙h<sub>t−1</sub>',
+    lstm: 'i, f, o = σ(·) &nbsp; g = tanh(·) &nbsp;→&nbsp; c<sub>t</sub> = f⊙c<sub>t−1</sub> + i⊙g ' +
+          '&nbsp;→&nbsp; h<sub>t</sub> = o⊙tanh(c<sub>t</sub>)',
+  };
+  html += '<h4>1 · The recurrence — ' + d.kind.toUpperCase() + '</h4>';
+  html += '<div class="formula">' + formulas[d.kind] + '</div>';
+
+  /* --- 2. gate arithmetic --- */
+  html += '<h4>2 · What each gate computes at this step</h4>';
+  html += '<div class="scrollx"><table class="mtab"><thead><tr><th>gate</th>' +
+    '<th>W<sub>x</sub>·x<sub>t</sub></th><th>W<sub>h</sub>·h<sub>t−1</sub></th>' +
+    '<th>bias</th><th>pre-activation</th><th>value</th></tr></thead><tbody>';
+  for (let g = 0; g < gates.length; g++) {
+    let ix = 0;
+    for (let i = 0; i < d.D; i++) ix += d.wx[g][i] * d.xv[i];
+    let ih = 0;
+    for (let v = 0; v < d.H; v++) ih += d.wh[g][v] * d.hprev[v];
+    const isCand = d.kind === 'gru' && g === 2;
+    const rec = isCand ? d.gates[1] * d.q : ih;       // GRU candidate is gated by r
+    const z = ix + rec + d.bias[g];
+    html += '<tr><td class="ch">' + gates[g][0] + ' = ' + gates[g][1] + '(·)</td>' +
+      '<td>' + n4(ix) + '</td>' +
+      '<td>' + n4(rec) + (isCand ? ' <span style="color:#98a2ad">= r·' + n3(d.q) + '</span>' : '') + '</td>' +
+      '<td>' + n3(d.bias[g]) + '</td>' +
+      '<td>' + n4(z) + '</td>' +
+      '<td class="sum">' + n4(d.gates[g]) + '</td></tr>';
+  }
+  html += '</tbody></table></div>';
+
+  /* --- 3. the weights behind those sums --- */
+  html += '<h4>3 · The weights that produced them</h4>';
+  html += '<div class="scrollx"><table class="mtab"><thead><tr><th>gate</th>';
+  for (let i = 0; i < d.D; i++) html += '<th>W<sub>x</sub>[' + i + ']<br>x=' + n3(d.xv[i]) + '</th>';
+  for (let v = 0; v < d.H; v++) html += '<th>W<sub>h</sub>[' + v + ']<br>h=' + n3(d.hprev[v]) + '</th>';
+  html += '</tr></thead><tbody>';
+  for (let g = 0; g < gates.length; g++) {
+    html += '<tr><td class="ch">' + gates[g][0] + '</td>';
+    for (let i = 0; i < d.D; i++) {
+      html += '<td class="cell"><span class="wv" style="color:' + wColor(d.wx[g][i]) + '">' +
+        n3(d.wx[g][i]) + '</span><span class="pv">' + n3(d.wx[g][i] * d.xv[i]) + '</span></td>';
+    }
+    for (let v = 0; v < d.H; v++) {
+      html += '<td class="cell"><span class="wv" style="color:' + wColor(d.wh[g][v]) + '">' +
+        n3(d.wh[g][v]) + '</span><span class="pv">' + n3(d.wh[g][v] * d.hprev[v]) + '</span></td>';
+    }
+    html += '</tr>';
+  }
+  html += '</tbody></table></div>';
+
+  /* --- 4. the state update --- */
+  html += '<h4>4 · The new state</h4>';
+  const hprevU = d.hprev[d.u];
+  if (d.kind === 'lstm') {
+    html += '<div class="formula">c<sub>t</sub> = f·c<sub>t−1</sub> + i·g = ' +
+      n3(d.gates[1]) + '·' + n3(d.cprev) + ' + ' + n3(d.gates[0]) + '·' + n3(d.gates[3]) +
+      ' = <span class="res">' + n4(d.c) + '</span></div>';
+    html += '<div class="formula" style="margin-top:6px">h<sub>t</sub> = o·tanh(c<sub>t</sub>) = ' +
+      n3(d.gates[2]) + '·' + n3(Math.tanh(d.c)) + ' = <span class="res">' + n4(d.h) + '</span>' +
+      (Math.abs(d.c) > 2.5 ? '  <span class="op">— the cell is saturating, tanh′ ≈ 0 here</span>' : '') +
+      '</div>';
+  } else if (d.kind === 'gru') {
+    html += '<div class="formula">h<sub>t</sub> = (1−z)·n + z·h<sub>t−1</sub> = ' +
+      n3(1 - d.gates[0]) + '·' + n3(d.gates[2]) + ' + ' + n3(d.gates[0]) + '·' + n3(hprevU) +
+      ' = <span class="res">' + n4(d.h) + '</span>' +
+      '  <span class="op">— z is how much of the old state is kept</span></div>';
+  } else {
+    html += '<div class="formula">h<sub>t</sub> = tanh(pre-activation) = <span class="res">' +
+      n4(d.h) + '</span>  <span class="op">(previous state of this unit: ' + n3(hprevU) + ')</span></div>';
+  }
+  if (st.snapshot) {
+    const drawn = st.snapshot[unit * st.L + t];
+    html += '<div class="formula" style="margin-top:6px"><span class="op">check: the unit map ' +
+      'holds ' + n4(drawn) + ' at t=' + t +
+      (Math.abs(drawn - d.h) < 1e-4 ? ' ✓ matches' : ' ⚠ mismatch') + '</span></div>';
+  }
+
+  /* --- 5. downstream --- */
+  html += rnnDownstreamHtml(li, unit);
+  host.innerHTML = html;
+}
+
+/** Where a hidden unit's sequence goes: the next layer, or the readout and logits. */
+function rnnDownstreamHtml(li, unit) {
+  const st = model.stages[li];
+  const last = li === model.stages.length - 1;
+  let html = '<h4>5 · Where this unit goes</h4>';
+
+  if (!last) {
+    const nx = model.stages[li + 1];
+    html += '<div class="formula">This unit is <b>input channel ' + unit + '</b> for all ' +
+      nx.C + ' units of layer ' + (li + 2) + '. Summed gate weights reading it:</div>';
+    html += '<div class="scrollx"><table class="mtab"><thead><tr><th>unit in layer ' + (li + 2) +
+      '</th><th>Σ|w| over gates</th></tr></thead><tbody>';
+    for (let co = 0; co < nx.C; co++) {
+      const s = rnnLinkStrength(nx, co, unit);
+      html += '<tr><td class="ch">unit ' + (co + 1) + '</td><td class="sum">' + n3(s.mag) + '</td></tr>';
+    }
+    html += '</tbody></table></div>';
+    return html;
+  }
+
+  const snap = st.snapshot, L = st.L, d = model.dense, cls = activeClasses();
+  let h = 0, argmax = 0, txt = '';
+  if (state.readout === 'mean') {
+    for (let i = 0; i < L; i++) h += snap[unit * L + i];
+    h /= L;
+    txt = 'Mean over time: h[' + unit + '] = (sum of ' + L + ' states) / ' + L +
+      ' = <span class="res">' + n4(h) + '</span>';
+  } else if (state.readout === 'max') {
+    h = -Infinity;
+    for (let i = 0; i < L; i++) if (snap[unit * L + i] > h) { h = snap[unit * L + i]; argmax = i; }
+    txt = 'Max over time: h[' + unit + '] = <span class="res">' + n4(h) +
+      '</span> <span class="op">(at t = ' + argmax + ')</span>';
+  } else {
+    h = snap[unit * L + (L - 1)];
+    txt = 'Last state: h[' + unit + '] = state at t = ' + (L - 1) +
+      ' = <span class="res">' + n4(h) + '</span>' +
+      (st.bidir && unit >= st.units
+        ? ' <span class="op">— for a backward unit this is the state after reading the whole window right to left, i.e. the state at t = 0</span>'
+        : '');
+  }
+  html += '<div class="formula">' + txt + '</div>';
+
+  html += '<div class="scrollx" style="margin-top:8px"><table class="mtab"><thead><tr>' +
+    '<th>class</th><th>weight</th><th>contribution</th><th>class bias</th>' +
+    '<th>logit</th><th>softmax</th></tr></thead><tbody>';
+  for (let j = 0; j < d.nout; j++) {
+    const w = d.W[j * d.nin + unit];
+    html += '<tr><td class="ch"><span class="chip" style="background:' + cls[j].color + '"></span> ' +
+      cls[j].name + '</td>' +
+      '<td style="color:' + wColor(w) + '">' + n4(w) + '</td>' +
+      '<td style="color:' + wColor(w * h) + '">' + n4(w * h) + '</td>' +
+      '<td>' + n3(d.b[j]) + '</td>' +
+      '<td class="sum">' + n3(model.logits[j]) + '</td>' +
+      '<td>' + (model.probs ? (model.probs[j] * 100).toFixed(1) + '%' : '—') + '</td></tr>';
+  }
+  html += '</tbody></table></div>';
+  return html;
 }
 
 /* ------------------------------------------------------------ filter */
@@ -736,6 +980,16 @@ function renderInputMath(host, title, slider) {
   host.innerHTML = html;
 }
 
+/** Human-readable name of whatever collapses the sequence before the linear layer. */
+function headName() {
+  if (state.arch === 'rnn') {
+    return state.readout === 'mean' ? 'the mean over time'
+      : state.readout === 'max' ? 'the max over time' : 'the last state';
+  }
+  return state.head === 'gap' ? 'Global Average Pool'
+    : state.head === 'gmp' ? 'Global Max Pool' : 'Flatten';
+}
+
 /* ------------------------------------------------------------- output */
 function renderOutputMath(host, title, slider) {
   slider.disabled = true;
@@ -752,8 +1006,7 @@ function renderOutputMath(host, title, slider) {
   let html = '<h4>1 · Linear layer</h4>';
   html += '<div class="formula">logit<sub>j</sub> = <span class="op">Σ</span><sub>c=0..' +
     (d.nin - 1) + '</sub> W[j][c] · h[c] + b[j]' +
-    '   <span class="op">(h is the output of ' +
-    (state.head === 'gap' ? 'Global Average Pool' : state.head === 'gmp' ? 'Global Max Pool' : 'Flatten') +
+    '   <span class="op">(h is the output of ' + headName() +
     ', ' + d.nin + ' numbers)</span></div>';
 
   if (model.embedding && state.head !== 'flat') {
@@ -822,6 +1075,21 @@ function receptiveField(layerIdx) {
 function buildLayerControls() {
   const host = $('layerControls');
   host.innerHTML = '';
+  if (state.arch === 'rnn') {
+    state.rnnLayers.forEach((ls) => {
+      const card = document.createElement('div');
+      card.className = 'laycard';
+      card.innerHTML =
+        '<div class="row"><button data-a="m">−</button><b>' + ls.units + '</b><button data-a="p">+</button></div>' +
+        '<div class="row"><label><input type="checkbox" data-a="bi"' +
+        (ls.bidir ? ' checked' : '') + '>bidir</label></div>';
+      card.querySelector('[data-a=m]').onclick = () => { if (ls.units > 1) { ls.units--; rebuildModel(); } };
+      card.querySelector('[data-a=p]').onclick = () => { if (ls.units < 10) { ls.units++; rebuildModel(); } };
+      card.querySelector('[data-a=bi]').onchange = (e) => { ls.bidir = e.target.checked; rebuildModel(); };
+      host.appendChild(card);
+    });
+    return;
+  }
   state.layers.forEach((ls, i) => {
     const card = document.createElement('div');
     card.className = 'laycard';
@@ -1044,7 +1312,12 @@ function renderWmPanel() {
       '% of each batch are triggers. Changing the class set changes their labels — ' +
       'the watermark then has to be embedded again.</p>';
   }
-  if (state.head !== 'flat') {
+  if (state.arch === 'rnn') {
+    html += '<div class="verdict no" style="margin-top:8px">⚠ <b>A recurrent readout collapses the ' +
+      'sequence to ' + (model ? model.finalC : '—') + ' numbers</b>, so a linear head cannot memorise ' +
+      wm.T + ' arbitrary label assignments. Watermark capacity here is far lower than with the ' +
+      'convolutional Flatten head — expect the verification to stay near chance.</div>';
+  } else if (state.head !== 'flat') {
     html += '<div class="verdict no" style="margin-top:8px">⚠ <b>This head will not carry the ' +
       'watermark.</b> Global Avg/Max Pool average the map over time, leaving only ' +
       (model ? model.finalC : '—') + ' numbers per trigger — a linear head cannot memorise ' + wm.T +
@@ -1087,15 +1360,28 @@ function bindUI() {
   $('mode').onchange = (e) => { state.mode = e.target.value; };
 
   $('layPlus').onclick = () => {
-    if (state.layers.length >= 4) return;
-    const last = state.layers[state.layers.length - 1];
-    state.layers.push({ filters: last.filters, kernel: last.kernel, pool: true });
+    const arr = archLayers();
+    if (arr.length >= (state.arch === 'cnn' ? 4 : 2)) return;
+    const last = arr[arr.length - 1];
+    arr.push(state.arch === 'cnn'
+      ? { filters: last.filters, kernel: last.kernel, pool: true }
+      : { units: last.units, bidir: last.bidir });
     rebuildModel(); evaluate(); renderMetrics();
   };
   $('layMinus').onclick = () => {
-    if (state.layers.length <= 1) return;
-    state.layers.pop();
+    const arr = archLayers();
+    if (arr.length <= 1) return;
+    arr.pop();
     rebuildModel(); evaluate(); renderMetrics();
+  };
+
+  $('archCnn').onclick = () => setArch('cnn');
+  $('archRnn').onclick = () => setArch('rnn');
+  $('cell').onchange = (e) => {
+    state.cell = e.target.value; rebuildModel(); evaluate(); renderMetrics(); renderNet();
+  };
+  $('readout').onchange = (e) => {
+    state.readout = e.target.value; rebuildModel(); evaluate(); renderMetrics(); renderNet();
   };
 
   const noise = $('noise'), strength = $('strength'), ntrain = $('ntrain');
@@ -1265,6 +1551,7 @@ function bindUI() {
 
 /* --------------------------------------------------------------- boot */
 function init() {
+  document.body.className = 'arch-' + state.arch;
   buildClassList();
   buildProbeSelect();
   regenData();

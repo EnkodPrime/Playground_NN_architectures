@@ -33,6 +33,16 @@ h3{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--mute
 }
 .topbar h1{font-size:17px;letter-spacing:.01em}
 .topbar p{margin:1px 0 0;font-size:12px;color:#b6c3cf}
+.archsw{display:flex;gap:0;background:rgba(255,255,255,.10);border-radius:9px;padding:3px}
+.archsw button{
+  border:none;background:transparent;color:#c3cfda;cursor:pointer;
+  padding:7px 16px;border-radius:7px;font-size:12.5px;font-weight:600;
+  font-family:inherit;white-space:nowrap;
+}
+.archsw button:hover{color:#fff}
+.archsw button.on{background:#fff;color:#2f3f4f}
+body.arch-cnn .rnnonly{display:none !important}
+body.arch-rnn .cnnonly{display:none !important}
 .epochbox{text-align:right}
 .epochbox .lbl{display:block;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#9fb0be}
 .epochbox .val{font:600 20px ui-monospace,Consolas,monospace}

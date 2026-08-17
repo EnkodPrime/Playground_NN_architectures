@@ -160,6 +160,31 @@ function linkStrength(conv, co, ci) {
   return { mag: sum / k, sign: signed >= 0 ? 1 : -1 };
 }
 
+/** Same idea for a recurrent unit: all gate weights that read input channel ci. */
+function rnnLinkStrength(stage, unit, ci) {
+  const layer = stage.layer;
+  const back = layer.bidir && unit >= layer.H;
+  const dir = back ? layer.bwd : layer.fwd;
+  const u = back ? unit - layer.H : unit;
+  let sum = 0, signed = 0;
+  for (let g = 0; g < dir.G; g++) {
+    const w = dir.px.W[(g * layer.H + u) * dir.D + ci];
+    sum += Math.abs(w); signed += w;
+  }
+  return { mag: sum / dir.G, sign: signed >= 0 ? 1 : -1 };
+}
+
+/** Uniform accessor so the diagram does not care which model it is drawing. */
+function stageLink(model, li, co, ci) {
+  const st = model.stages[li];
+  return st.conv ? linkStrength(st.conv, co, ci) : rnnLinkStrength(st, co, ci);
+}
+
+function stageInputCount(model, li) {
+  const st = model.stages[li];
+  return st.conv ? st.conv.cin : st.layer.fwd.D;
+}
+
 function outLinkStrength(model, ci) {
   const d = model.dense;
   let sum = 0, signed = 0;
@@ -185,14 +210,14 @@ function drawNetwork(ctx, o) {
   // --- links
   for (let li = 0; li < model.stages.length; li++) {
     const prev = cols[li], cur = cols[li + 1];
-    const conv = model.stages[li].conv;
+    const nOut = model.stages[li].C, nIn = stageInputCount(model, li);
     let maxMag = 1e-6;
-    for (let co = 0; co < conv.cout; co++)
-      for (let ci = 0; ci < conv.cin; ci++)
-        maxMag = Math.max(maxMag, linkStrength(conv, co, ci).mag);
-    for (let co = 0; co < conv.cout; co++) {
-      for (let ci = 0; ci < conv.cin; ci++) {
-        const { mag, sign } = linkStrength(conv, co, ci);
+    for (let co = 0; co < nOut; co++)
+      for (let ci = 0; ci < nIn; ci++)
+        maxMag = Math.max(maxMag, stageLink(model, li, co, ci).mag);
+    for (let co = 0; co < nOut; co++) {
+      for (let ci = 0; ci < nIn; ci++) {
+        const { mag, sign } = stageLink(model, li, co, ci);
         const a = mag / maxMag;
         const from = prev.nodes[Math.min(ci, prev.nodes.length - 1)];
         const to = cur.nodes[co];
@@ -236,8 +261,9 @@ function drawNetwork(ctx, o) {
     const snap = st.snapshot;
     let scale = 1e-6;
     if (snap) for (let i = 0; i < snap.length; i++) scale = Math.max(scale, Math.abs(snap[i]));
-    label(ctx, col.x, col.nodes[0].y - 8,
-      'LAYER ' + (li + 1) + ' · K=' + st.conv.k + (st.pooled ? ' · pool' : ''));
+    label(ctx, col.x, col.nodes[0].y - 8, st.conv
+      ? 'LAYER ' + (li + 1) + ' · K=' + st.conv.k + (st.pooled ? ' · pool' : '')
+      : 'LAYER ' + (li + 1) + ' · ' + st.kind.toUpperCase() + (st.bidir ? ' · bi' : ''));
     for (let c = 0; c < col.nodes.length; c++) {
       const nd = col.nodes[c];
       const isHot = hover && hover.type === 'filter' && hover.layer === li && hover.ch === c;
@@ -251,12 +277,21 @@ function drawNetwork(ctx, o) {
           drawWave(ctx, nd.x + 4, nd.y + 4, nd.w - 8, nd.h - 8, snap, c * st.L, st.L, scale);
         }
       }
-      // small kernel glyph in the top-left corner, on a light backing
-      const kw = Math.min(30, st.conv.k * 4);
-      ctx.fillStyle = 'rgba(255,255,255,0.86)';
-      ctx.fillRect(nd.x + 3, nd.y + 2, kw + 4, 14);
-      drawKernel(ctx, nd.x + 5, nd.y + 3, kw, 12,
-        st.conv.W, (c * st.conv.cin) * st.conv.k, st.conv.k);
+      if (st.conv) {
+        // small kernel glyph in the top-left corner, on a light backing
+        const kw = Math.min(30, st.conv.k * 4);
+        ctx.fillStyle = 'rgba(255,255,255,0.86)';
+        ctx.fillRect(nd.x + 3, nd.y + 2, kw + 4, 14);
+        drawKernel(ctx, nd.x + 5, nd.y + 3, kw, 12,
+          st.conv.W, (c * st.conv.cin) * st.conv.k, st.conv.k);
+      } else if (st.bidir) {
+        // mark which direction this unit belongs to
+        ctx.fillStyle = 'rgba(255,255,255,0.86)';
+        ctx.fillRect(nd.x + 3, nd.y + 2, 16, 12);
+        ctx.fillStyle = '#7b8794';
+        ctx.font = '600 9px system-ui, sans-serif';
+        ctx.fillText(c < st.units ? '→' : '←', nd.x + 6, nd.y + 11);
+      }
     }
   }
 
@@ -319,13 +354,20 @@ function drawSelectionOverlay(ctx, o) {
   if (sel.type !== 'filter') return;
 
   const st = model.stages[sel.layer];
-  const k = st.conv.k, pad = st.conv.pad;
   const prevCol = cols[sel.layer];              // the column feeding the selected layer
   const prevLen = sel.layer === 0 ? WIN : model.stages[sel.layer - 1].L;
   const inner = sel.layer === 0 ? 5 : 4;
-  // the kernel receptive window across every input channel
-  prevCol.nodes.forEach((nd) =>
-    span(nd, inner, prevLen, tPos - pad, tPos + k - 1 - pad, 'rgba(29,78,216,0.16)'));
+  if (st.conv) {
+    // the kernel receptive window across every input channel
+    const k = st.conv.k, pad = st.conv.pad;
+    prevCol.nodes.forEach((nd) =>
+      span(nd, inner, prevLen, tPos - pad, tPos + k - 1 - pad, 'rgba(29,78,216,0.16)'));
+  } else {
+    // a recurrent state has seen everything up to t — backward units, everything after
+    const back = st.bidir && sel.ch >= st.units;
+    prevCol.nodes.forEach((nd) => span(nd, inner, prevLen,
+      back ? tPos : 0, back ? prevLen - 1 : tPos, 'rgba(29,78,216,0.13)'));
+  }
   // the point being computed
   const outNd = cols[sel.layer + 1].nodes[sel.ch];
   const tp = st.pooled ? tPos >> 1 : tPos;

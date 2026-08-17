@@ -243,6 +243,7 @@ class ConvNet1D {
    *          activation:string, head:string, nClasses:number, inputLen:number}} cfg
    */
   constructor(cfg) {
+    this.kind = 'cnn';
     this.cfg = JSON.parse(JSON.stringify(cfg));
     this.build();
     this.t = 0;                 // Adam step counter

@@ -1,8 +1,13 @@
-# 1D CNN Playground
+# NN Architecture Playground
 
-An interactive playground for **1D convolutional networks**, in the spirit of the
-[TensorFlow Playground](https://playground.tensorflow.org/) but for signals instead of
-2D points. The task is recognising power-quality disturbances in 50 Hz mains voltage.
+An interactive playground for neural network architectures on **signals**, in the spirit of the
+[TensorFlow Playground](https://playground.tensorflow.org/) but for time series instead of 2D
+points. The task is recognising power-quality disturbances in 50 Hz mains voltage.
+
+Two architectures share the same data, metrics and tooling, switchable at the top of the page:
+
+* **1D CNN** — convolutional filters over the window
+* **RNN** — recurrent cells over the same window: simple tanh RNN, GRU or LSTM
 
 Everything runs in the browser. No dependencies, no build step, no server.
 
@@ -33,32 +38,40 @@ The network classifies which disturbance the window contains:
 Background noise, disturbance strength and dataset size are adjustable. The test set is
 generated separately at 40% of the training size.
 
-## The network
+## The networks
 
-1–4 convolutional layers (`same` padding, stride 1), 1–10 filters each, kernel
+**Convolutional.** 1–4 layers (`same` padding, stride 1), 1–10 filters each, kernel
 K ∈ {3,5,7,9,11}, optional max-pooling ×2; ReLU / Tanh / Leaky ReLU / Abs activation;
-a Global Average Pool, Global Max Pool or Flatten head followed by a linear layer and
-softmax. Trained with **Adam** and cross-entropy, with optional L2.
+a Global Average Pool, Global Max Pool or Flatten head.
 
-Forward and backward passes are written from scratch in `js/nn.js` — convolution,
-max-pooling, global pooling, dense layer and softmax, all over flat `Float32Array`s
-indexed as `[channel * length + t]`.
+**Recurrent.** 1–2 layers, 1–10 units each, optionally bidirectional; simple tanh RNN, GRU or
+LSTM cell; readout by last state, mean over time or max over time. Trained by backpropagation
+through all 128 steps, with global gradient-norm clipping — without it the loss oscillates
+instead of converging.
+
+Both feed a linear layer and softmax, and are trained with **Adam** and cross-entropy plus
+optional L2. Forward and backward passes are written from scratch in `js/nn.js` and `js/rnn.js` —
+convolution, pooling, the three recurrent cells, dense layer and softmax, all over flat
+`Float32Array`s indexed as `[channel * length + t]`. The BPTT gradients agree with numeric
+finite differences to within 0.3% at the full sequence length.
 
 ## Panels
 
-**Network diagram.** Every filter is a box showing its output map for the current example,
-with the learned kernel in the corner. Link thickness and colour encode weight magnitude and
+**Network diagram.** Every box is a filter (CNN) or a hidden unit (RNN), showing its output map
+or its state h(t) for the current example. Link thickness and colour encode weight magnitude and
 sign. A *Time / Spectrum* switch turns every map into its magnitude spectrum, which is where
-band-pass and high-pass filters become obvious.
+band-pass and high-pass filters become obvious. Selecting a node highlights what it actually sees:
+a fixed receptive field for a convolution, everything up to t for a recurrent unit.
 
 **Inspector.** Feeds single examples through the trained network without touching the weights.
 The class menu includes classes the network was *not* trained on, a quick test runs 50 fresh
 examples and reports the distribution of answers, and a CSV box accepts your own samples.
 
-**Arithmetic.** Clicking a node expands the exact computation with live numbers: every `w · x`
-product of the convolution, the bias, the pre-activation, the activation, the pooling
-comparison, and the contribution of that filter to each class logit. Clicking the output
-expands the softmax and the cross-entropy loss term by term.
+**Arithmetic.** Clicking a node expands the exact computation with live numbers. For a filter:
+every `w · x` product of the convolution, the bias, the pre-activation, the activation, the
+pooling comparison. For a recurrent unit: what each gate computes at step t, the weights behind
+those sums, and the state update — `c = f·c + i·g` for LSTM, `h = (1−z)·n + z·h` for GRU. Both end
+with the contribution to each class logit; clicking the output expands softmax and the loss.
 
 **Live stream.** A continuously generated signal flows through a ring buffer; the most recent
 128 samples are classified on every frame. Disturbances are toggled on the fly, a scope shows
@@ -79,7 +92,8 @@ binomial test. Includes pruning and fine-tuning attacks to see how much of it su
 |---|---|
 | `js/signal.js` | signal and dataset generation |
 | `js/fft.js` | radix-2 FFT, spectra and kernel frequency response |
-| `js/nn.js` | layers, forward/backprop, Adam, evaluation |
+| `js/nn.js` | convolutional layers, forward/backprop, Adam, evaluation |
+| `js/rnn.js` | RNN / GRU / LSTM cells, BPTT, gradient clipping, readouts |
 | `js/viz.js` | layout and canvas drawing |
 | `js/stream.js` | live generator, scope and decision ribbon |
 | `js/ood.js` | novelty scores, calibration, AUC, histograms |

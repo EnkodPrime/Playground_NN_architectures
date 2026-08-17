@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>1D CNN Playground — power-line disturbances</title>
+<title>NN Architecture Playground — power-line disturbances</title>
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -12,10 +12,14 @@
   <div class="brand">
     <span class="logo">∿</span>
     <div>
-      <h1>1D CNN Playground</h1>
+      <h1>NN Architecture Playground</h1>
       <p>Classifying disturbances in mains voltage — in the browser, no libraries</p>
     </div>
   </div>
+  <nav class="archsw" role="tablist">
+    <button id="archCnn" class="on" role="tab">1D CNN Playground</button>
+    <button id="archRnn" role="tab">RNN Playground</button>
+  </nav>
   <div class="epochbox">
     <span class="lbl">Epoch</span>
     <span id="epoch" class="val">000,000</span>
@@ -34,12 +38,20 @@
     </select>
   </label>
 
-  <label class="ctl"><span>Activation</span>
+  <label class="ctl cnnonly"><span>Activation</span>
     <select id="act">
       <option value="relu" selected>ReLU</option>
       <option value="tanh">Tanh</option>
       <option value="leaky">Leaky ReLU</option>
       <option value="abs">Abs (envelope detector)</option>
+    </select>
+  </label>
+
+  <label class="ctl rnnonly"><span>Cell</span>
+    <select id="cell">
+      <option value="gru" selected>GRU</option>
+      <option value="lstm">LSTM</option>
+      <option value="rnn">Simple RNN (tanh)</option>
     </select>
   </label>
 
@@ -58,11 +70,19 @@
     </select>
   </label>
 
-  <label class="ctl"><span>Output head</span>
+  <label class="ctl cnnonly"><span>Output head</span>
     <select id="head">
       <option value="gap" selected>Global Avg Pool</option>
       <option value="gmp">Global Max Pool</option>
       <option value="flat">Flatten</option>
+    </select>
+  </label>
+
+  <label class="ctl rnnonly"><span>Readout</span>
+    <select id="readout">
+      <option value="mean" selected>Mean over time</option>
+      <option value="last">Last state</option>
+      <option value="max">Max over time</option>
     </select>
   </label>
 
@@ -114,7 +134,7 @@
     <div class="centerhead">
       <h2>Architecture</h2>
       <div class="layerbtns">
-        <span>Convolutional layers</span>
+        <span id="layerLbl">Convolutional layers</span>
         <button id="layMinus">−</button>
         <b id="layCount">2</b>
         <button id="layPlus">+</button>
@@ -125,10 +145,15 @@
       <div id="layerControls" class="layerctl"></div>
       <canvas id="net"></canvas>
     </div>
-    <p class="hint">Each box is one filter — inside it is that filter's output map for the current
-      example, and in the top-left corner the learned kernel itself. Link thickness is weight
-      magnitude (<span class="sw pos"></span> positive, <span class="sw neg"></span> negative).
-      Hover for a quick look, <b>click</b> a node for the full arithmetic below.</p>
+    <p class="hint cnnonly">Each box is one filter — inside it is that filter's output map for the
+      current example, and in the top-left corner the learned kernel itself. Link thickness is
+      weight magnitude (<span class="sw pos"></span> positive, <span class="sw neg"></span>
+      negative). Hover for a quick look, <b>click</b> a node for the full arithmetic below.</p>
+    <p class="hint rnnonly">Each box is one hidden unit — inside it is its state h<sub>t</sub>
+      across the whole window, which is what a recurrent net actually computes. Link thickness is
+      the size of the input weights (<span class="sw pos"></span> positive,
+      <span class="sw neg"></span> negative). With a bidirectional layer, → units read the window
+      forwards and ← units backwards. <b>Click</b> a unit for the step-by-step recurrence below.</p>
   </section>
 
   <!-- ============================ RESULTS ============================ -->
@@ -281,8 +306,26 @@
 </section>
 
 <footer class="notes">
-  <h3>Things to try</h3>
-  <ul>
+  <h3 class="rnnonly">Things to try — RNN</h3>
+  <ul class="rnnonly">
+    <li><b>Start with GRU</b>, mean readout, 8 units. It is the fastest of the three to converge
+      here: roughly 97% on four classes within a hundred epochs.</li>
+    <li><b>Simple RNN vs gated cells</b> — the plain tanh cell stalls around 50%. Backpropagating
+      through 128 steps without gates is the vanishing-gradient problem, live.</li>
+    <li><b>LSTM</b> needs noticeably more epochs than GRU on this task, and its cell state can
+      saturate: click a unit and watch |c| in the state update — once tanh(c) sits at ±1, the
+      gradient through it is gone.</li>
+    <li><b>Readout matters</b> — <i>last state</i> forces the network to carry information all the
+      way to the end of the window, while <i>mean over time</i> lets every step contribute. Impulses
+      favour <i>max</i>.</li>
+    <li><b>Bidirectional</b> doubles the units: → ones read the window forwards, ← ones backwards.
+      Click a ← unit and see how the highlighted history flips to the other side of the window.</li>
+    <li>Compare with the CNN on the same data: a convolution sees a fixed receptive field, while a
+      recurrent unit sees <b>everything up to t</b> — the selection overlay shows the difference.</li>
+  </ul>
+
+  <h3 class="cnnonly">Things to try</h3>
+  <ul class="cnnonly">
     <li><b>Ripple vs clean</b> — two filters with K=5 in a single layer are enough. Switch the maps
       to “Spectrum” to watch the filter turn into a band detector around 400–900&nbsp;Hz.</li>
     <li><b>Impulses</b> — pick the <i>Global Max Pool</i> head: it reacts to a single position in the
@@ -302,6 +345,7 @@
 <script src="js/signal.js"></script>
 <script src="js/fft.js"></script>
 <script src="js/nn.js"></script>
+<script src="js/rnn.js"></script>
 <script src="js/viz.js"></script>
 <script src="js/stream.js"></script>
 <script src="js/ood.js"></script>
