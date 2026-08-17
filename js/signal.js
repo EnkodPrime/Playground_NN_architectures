@@ -46,7 +46,10 @@ function generateSample(classId, opt) {
   const x = new Float32Array(WIN);
   const A = rand(0.95, 1.05);
   const ph = rand(0, Math.PI * 2);
-  const w0 = 2 * Math.PI * F0 / SR;
+  // opt.f0 lets the inspector probe a grid at another fundamental while the
+  // training set stays where it is. Ripple, impulse and EMI keep their absolute
+  // frequencies — they come from switching hardware, not from the mains.
+  const w0 = 2 * Math.PI * (opt.f0 || F0) / SR;
 
   // amplitude envelope (1 everywhere unless there is a sag)
   const env = new Float32Array(WIN).fill(1);

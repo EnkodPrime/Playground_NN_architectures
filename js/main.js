@@ -33,6 +33,7 @@ const state = {
   probeLabel: 0,        // index into the trained classes, or −1 if out of distribution
   probeClassId: null,   // which class produced the example ('custom' for a loaded signal)
   probePick: 'rand',
+  probeF0: 50,          // inspector only; the training set stays at F0
   customSignal: null,
 };
 
@@ -49,6 +50,10 @@ function activeClasses() {
 }
 function dataOpt() {
   return { noise: state.noise, strength: state.strength };
+}
+/** Options for inspector examples only — the training set keeps the default 50 Hz. */
+function probeOpt() {
+  return { noise: state.noise, strength: state.strength, f0: state.probeF0 };
 }
 
 /* -------------------------------------------------------------- data */
@@ -74,7 +79,7 @@ function newProbe() {
   } else {
     id = state.probePick;
   }
-  state.probe = generateSample(id, dataOpt());
+  state.probe = generateSample(id, probeOpt());
   state.probeClassId = id;
   state.probeLabel = ids.indexOf(id);   // −1 when the class is not part of training
 }
@@ -1504,10 +1509,10 @@ function quickTest() {
     let x, ti = trueIdx;
     if (randomMode) {
       const k = Math.floor(Math.random() * act.length);
-      x = generateSample(act[k].id, dataOpt());
+      x = generateSample(act[k].id, probeOpt());
       ti = k;
     } else {
-      x = generateSample(state.probePick, dataOpt());
+      x = generateSample(state.probePick, probeOpt());
     }
     const p = model.forward(x, false);
     let arg = 0;
@@ -1786,6 +1791,10 @@ function bindUI() {
     state.probePick = e.target.value; newProbe(); $('qtResult').innerHTML = '';
   };
   $('btnProbe').onclick = () => { setStream(false); newProbe(); };
+  $('probeF0').onchange = (e) => {
+    state.probeF0 = +e.target.value;
+    setStream(false); newProbe(); $('qtResult').innerHTML = ''; renderNet();
+  };
   $('btnQuick').onclick = () => quickTest();
   $('csvLoad').onclick = () => loadCustomSignal();
 
