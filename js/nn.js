@@ -9,10 +9,12 @@ function heInit(arr, fanIn) {
 
 /* ------------------------------------------------------------------ Conv1D */
 class Conv1D {
-  constructor(cin, cout, k) {
+  constructor(cin, cout, k, dil, causal) {
     this.type = 'conv';
     this.cin = cin; this.cout = cout; this.k = k;
-    this.pad = k >> 1;                       // 'same' zero padding
+    this.dil = dil || 1;                     // dilation: taps spaced this far apart
+    this.causal = !!causal;                  // pad only on the left, no look-ahead
+    this.pad = ((k - 1) * this.dil) >> 1;    // 'same' zero padding
     this.W = new Float32Array(cout * cin * k);
     this.b = new Float32Array(cout);
     this.rows = cout; this.cols = cin * k;     // grouping for per-channel quantisation
@@ -24,9 +26,13 @@ class Conv1D {
     this.mb = new Float32Array(cout);
     this.vb = new Float32Array(cout);
   }
+  /** Offset of tap j relative to the output position. */
+  tapOffset(j) {
+    return this.causal ? (j - (this.k - 1)) * this.dil : j * this.dil - this.pad;
+  }
   forward(x, L) {
     this.x = x; this.L = L;
-    const { cin, cout, k, pad, W, b } = this;
+    const { cin, cout, k, W, b } = this;
     const out = new Float32Array(cout * L);
     for (let co = 0; co < cout; co++) {
       const ob = co * L;
@@ -38,7 +44,7 @@ class Conv1D {
         for (let j = 0; j < k; j++) {
           const w = W[wb + j];
           if (w === 0) continue;
-          const shift = j - pad;
+          const shift = this.tapOffset(j);
           const tStart = Math.max(0, -shift);
           const tEnd = Math.min(L, L - shift);
           for (let t = tStart; t < tEnd; t++) out[ob + t] += w * x[xb + t + shift];
@@ -48,7 +54,7 @@ class Conv1D {
     return out;
   }
   backward(dout) {
-    const { cin, cout, k, pad, W, gW, gb, x, L } = this;
+    const { cin, cout, k, W, gW, gb, x, L } = this;
     const dx = new Float32Array(cin * L);
     for (let co = 0; co < cout; co++) {
       const ob = co * L;
@@ -59,7 +65,7 @@ class Conv1D {
         const wb = (co * cin + ci) * k;
         const xb = ci * L;
         for (let j = 0; j < k; j++) {
-          const shift = j - pad;
+          const shift = this.tapOffset(j);
           const tStart = Math.max(0, -shift);
           const tEnd = Math.min(L, L - shift);
           let acc = 0;
@@ -294,7 +300,7 @@ class ConvNet1D {
     let cin = 1, L = cfg.inputLen;
 
     cfg.layers.forEach((ls, i) => {
-      const conv = new Conv1D(cin, ls.filters, ls.kernel);
+      const conv = new Conv1D(cin, ls.filters, ls.kernel, ls.dilation || 1, cfg.causal);
       this.seq.push(conv);
       this.convs.push(conv);
       const act = new Activation(cfg.activation);

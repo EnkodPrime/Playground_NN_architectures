@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NN Architecture Playground — power-line disturbances</title>
-<link rel="stylesheet" href="css/style.css?v=6">
+<link rel="stylesheet" href="css/style.css?v=7">
 </head>
 <body>
 
@@ -70,6 +70,10 @@
     <select id="batch">
       <option>4</option><option>8</option><option selected>16</option><option>32</option>
     </select>
+  </label>
+
+  <label class="ctl cnnonly inline" style="align-self:flex-end;padding-bottom:6px">
+    <input type="checkbox" id="causal"> causal (TCN)
   </label>
 
   <label class="ctl cnnonly"><span>Output head</span>
@@ -451,17 +455,17 @@
   </ul>
 </footer>
 
-<script src="js/signal.js?v=6"></script>
-<script src="js/fft.js?v=6"></script>
-<script src="js/nn.js?v=6"></script>
-<script src="js/rnn.js?v=6"></script>
-<script src="js/ssm.js?v=6"></script>
-<script src="js/gnn.js?v=6"></script>
-<script src="js/viz.js?v=6"></script>
-<script src="js/stream.js?v=6"></script>
-<script src="js/ood.js?v=6"></script>
-<script src="js/watermark.js?v=6"></script>
-<script src="js/quant.js?v=6"></script>
-<script src="js/main.js?v=6"></script>
+<script src="js/signal.js?v=7"></script>
+<script src="js/fft.js?v=7"></script>
+<script src="js/nn.js?v=7"></script>
+<script src="js/rnn.js?v=7"></script>
+<script src="js/ssm.js?v=7"></script>
+<script src="js/gnn.js?v=7"></script>
+<script src="js/viz.js?v=7"></script>
+<script src="js/stream.js?v=7"></script>
+<script src="js/ood.js?v=7"></script>
+<script src="js/watermark.js?v=7"></script>
+<script src="js/quant.js?v=7"></script>
+<script src="js/main.js?v=7"></script>
 </body>
 </html>

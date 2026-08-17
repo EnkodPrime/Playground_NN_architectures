@@ -375,9 +375,9 @@ function drawSelectionOverlay(ctx, o) {
   const inner = sel.layer === 0 ? 5 : 4;
   if (st.conv) {
     // the kernel receptive window across every input channel
-    const k = st.conv.k, pad = st.conv.pad;
-    prevCol.nodes.forEach((nd) =>
-      span(nd, inner, prevLen, tPos - pad, tPos + k - 1 - pad, 'rgba(29,78,216,0.16)'));
+    const c = st.conv;
+    prevCol.nodes.forEach((nd) => span(nd, inner, prevLen,
+      tPos + c.tapOffset(0), tPos + c.tapOffset(c.k - 1), 'rgba(29,78,216,0.16)'));
   } else {
     // a recurrent state has seen everything up to t — backward units, everything after
     const back = st.bidir && sel.ch >= st.units;

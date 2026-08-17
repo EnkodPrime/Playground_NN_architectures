@@ -17,6 +17,7 @@ const state = {
   readout: 'mean',
   activation: 'relu',
   head: 'gap',
+  causal: false,
   lr: 0.003,
   l2: 0,
   batch: 16,
@@ -112,6 +113,7 @@ function rebuildModel() {
       layers: JSON.parse(JSON.stringify(state.layers)),
       activation: state.activation,
       head: state.head,
+      causal: state.causal,
       nClasses: activeClasses().length,
       inputLen: WIN,
     });
@@ -661,7 +663,7 @@ function convAt(li, ch, t) {
     const row = [];
     let sub = 0;
     for (let j = 0; j < K; j++) {
-      const idx = t + j - pad;
+      const idx = t + conv.tapOffset(j);
       const outside = idx < 0 || idx >= Lin;
       const xv = outside || !xin ? 0 : xin[ci * Lin + idx];
       const w = conv.W[(ch * cin + ci) * K + j];
@@ -1098,12 +1100,16 @@ function renderFilterMath(host, title, slider, sel) {
   html += '<div class="formula">z[<b>' + t + '</b>] = ' +
     '<span class="op">Σ</span><sub>c=0..' + (c.cin - 1) + '</sub> ' +
     '<span class="op">Σ</span><sub>j=0..' + (c.K - 1) + '</sub> ' +
-    'W[<b>filter ' + (ch + 1) + '</b>][c][j] · x[c][' + t + ' + j − ' + c.pad + '] + b' +
+    'W[<b>filter ' + (ch + 1) + '</b>][c][j] · x[c][' + t + ' + offset(j)] + b' +
+    (c.conv.dil > 1 ? '  <span class="op">dilation ' + c.conv.dil +
+      ': the taps are ' + c.conv.dil + ' samples apart, so this kernel spans ' +
+      ((c.K - 1) * c.conv.dil + 1) + ' samples with only ' + c.K + ' weights</span>' : '') +
+    (c.conv.causal ? '  <span class="op">causal: no tap reaches past t</span>' : '') +
     '</div>';
 
   html += '<div class="scrollx"><table class="mtab"><thead><tr><th>input</th>';
   for (let j = 0; j < c.K; j++) {
-    const idx = t + j - c.pad;
+    const idx = t + c.conv.tapOffset(j);
     html += '<th>j=' + j + '<br>x[' + idx + ']</th>';
   }
   html += '<th>Σ per channel</th></tr></thead><tbody>';
@@ -1369,7 +1375,8 @@ function poolsBefore(layerIdx) {
 function receptiveField(layerIdx) {
   let rf = 1, jump = 1;
   for (let i = 0; i <= layerIdx; i++) {
-    rf += (model.stages[i].conv.k - 1) * jump;
+    const c = model.stages[i].conv;
+    rf += (c.k - 1) * c.dil * jump;
     if (model.stages[i].pooled) { rf += jump; jump *= 2; }
   }
   return rf;
@@ -1416,11 +1423,15 @@ function buildLayerControls() {
         '<option value="' + k + '"' + (k === ls.kernel ? ' selected' : '') + '>K=' + k + '</option>').join('') +
       '</select>' +
       '<label><input type="checkbox" data-a="pool"' + (ls.pool ? ' checked' : '') + '>pool</label>' +
-      '</div>';
+      '</div><div class="row">' +
+      '<select data-a="d">' + [1, 2, 4, 8, 16].map((d) =>
+        '<option value="' + d + '"' + (d === (ls.dilation || 1) ? ' selected' : '') +
+        '>d=' + d + '</option>').join('') + '</select></div>';
     card.querySelector('[data-a=m]').onclick = () => { if (ls.filters > 1) { ls.filters--; rebuildModel(); } };
     card.querySelector('[data-a=p]').onclick = () => { if (ls.filters < 10) { ls.filters++; rebuildModel(); } };
     card.querySelector('[data-a=k]').onchange = (e) => { ls.kernel = +e.target.value; rebuildModel(); };
     card.querySelector('[data-a=pool]').onchange = (e) => { ls.pool = e.target.checked; rebuildModel(); };
+    card.querySelector('[data-a=d]').onchange = (e) => { ls.dilation = +e.target.value; rebuildModel(); };
     host.appendChild(card);
   });
 }
@@ -1728,6 +1739,9 @@ function bindUI() {
   $('act').onchange = (e) => { state.activation = e.target.value; rebuildModel(); evaluate(); renderMetrics(); };
   $('head').onchange = (e) => { state.head = e.target.value; rebuildModel(); evaluate(); renderMetrics(); };
   $('mode').onchange = (e) => { state.mode = e.target.value; };
+  $('causal').onchange = (e) => {
+    state.causal = e.target.checked; rebuildModel(); evaluate(); renderMetrics(); renderNet();
+  };
 
   $('layPlus').onclick = () => {
     const arr = archLayers();
