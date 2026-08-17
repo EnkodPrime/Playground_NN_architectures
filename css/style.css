@@ -226,6 +226,7 @@ button.strplay.on{background:#c0392b}
 }
 .wmhead button:hover{background:#f0f4f8}
 .wmhead button.hidden{display:none}
+.wmbreak{flex-basis:100%;height:0}
 .wmgrid{display:grid;grid-template-columns:300px 1fr;gap:16px;margin-top:10px}
 #wmSweep{height:190px;border:1px solid var(--line)}
 #wmSig{height:92px;border:1px solid var(--line);margin-top:8px}

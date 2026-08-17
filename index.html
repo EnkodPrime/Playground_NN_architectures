@@ -324,6 +324,21 @@
       </select>
     </label>
     <button id="wmVerifyBtn">Verify model</button>
+    <span class="wmbreak"></span>
+    <label class="ctl inline"><span>Embed after training</span>
+      <select id="wmPostMode">
+        <option value="full" selected>Full fine-tune</option>
+        <option value="lora">LoRA adapter</option>
+      </select>
+    </label>
+    <label class="ctl inline"><span>rank</span>
+      <select id="wmRank"><option>1</option><option selected>2</option><option>4</option></select>
+    </label>
+    <label class="ctl inline"><span>epochs</span>
+      <select id="wmPostEp"><option>10</option><option selected>20</option><option>40</option></select>
+    </label>
+    <button id="wmEmbedBtn">Embed now</button>
+    <button id="wmUndoPostBtn" class="hidden">Undo embedding</button>
     <button id="wmPruneBtn">Pruning test</button>
     <button id="wmFtBtn">Attack: 20 clean epochs</button>
     <button id="wmUndoBtn" class="hidden">Restore weights</button>

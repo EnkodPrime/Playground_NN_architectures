@@ -220,6 +220,22 @@ class Dense {
       for (let i = 0; i < this.nin; i++) s += this.W[wb + i] * x[i];
       out[j] = s;
     }
+    // optional low-rank adapter: the effective weight is W + B·A
+    if (this.lora) {
+      const { pA, pB, r } = this.lora;
+      const t = new Float32Array(r);
+      for (let q = 0; q < r; q++) {
+        let s = 0;
+        for (let i = 0; i < this.nin; i++) s += pA.W[q * this.nin + i] * x[i];
+        t[q] = s;
+      }
+      this.lora.t = t;
+      for (let j = 0; j < this.nout; j++) {
+        let s = 0;
+        for (let q = 0; q < r; q++) s += pB.W[j * r + q] * t[q];
+        out[j] += s;
+      }
+    }
     return out;
   }
   backward(dout) {
@@ -232,6 +248,25 @@ class Dense {
       for (let i = 0; i < this.nin; i++) {
         this.gW[wb + i] += d * this.x[i];
         dx[i] += d * this.W[wb + i];
+      }
+    }
+    if (this.lora) {
+      const { pA, pB, r, t } = this.lora;
+      const dt = new Float32Array(r);
+      for (let j = 0; j < this.nout; j++) {
+        const d = dout[j];
+        for (let q = 0; q < r; q++) {
+          pB.gW[j * r + q] += d * t[q];
+          dt[q] += pB.W[j * r + q] * d;
+        }
+      }
+      for (let q = 0; q < r; q++) {
+        const g = dt[q];
+        if (g === 0) continue;
+        for (let i = 0; i < this.nin; i++) {
+          pA.gW[q * this.nin + i] += g * this.x[i];
+          dx[i] += g * pA.W[q * this.nin + i];
+        }
       }
     }
     return dx;

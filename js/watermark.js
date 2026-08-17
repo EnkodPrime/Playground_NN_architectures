@@ -112,6 +112,87 @@ function wmVerify() {
   return wm.last;
 }
 
+/* ------------------------------------------- embedding after training */
+/**
+ * Marks an already trained model instead of training the watermark in from the
+ * start — the usual situation, since a released checkpoint is what you get.
+ *
+ * 'full'  fine-tunes every weight; 'lora' freezes the model and trains only a
+ * rank-r adapter on the output layer, which is then merged in. Merged, the two
+ * are indistinguishable at inference; the adapter route matters because the base
+ * stays byte-identical, so one model can be shipped with a different key per
+ * recipient. It buys a workflow, not extra security.
+ *
+ * Clean examples are mixed into every batch. Without them the model learns the
+ * triggers and forgets the task — the mirror image of the fine-tuning attack.
+ */
+function wmEmbedPost(mode, epochs, share, rank) {
+  wmEnsure();
+  const K = activeClasses().length;
+  const snap = wmSnapshot();
+  const before = { acc: model.evaluate(test, K, 300).acc, v: wmVerify() };
+
+  const d = model.dense;
+  let saved = null, pA = null, pB = null;
+  if (mode === 'lora') {
+    pA = makeParam(rank, d.nin, 1 / Math.sqrt(d.nin), 0);
+    pB = makeParam(d.nout, rank, 0, 0);          // B starts at zero, so ΔW starts at zero
+    d.lora = { pA, pB, r: rank };
+    saved = model.params;
+    model.params = [pA, pB];                     // everything else is frozen
+  }
+
+  const B = state.batch;
+  const bx = new Array(B), by = new Array(B), idx = new Array(B);
+  const target = state.epoch + epochs;
+  let guard = 0;
+  while (state.epoch < target && guard++ < 200000) {
+    for (let i = 0; i < B; i++) {
+      idx[i] = i;
+      if (Math.random() < share) {
+        const t = Math.floor(Math.random() * wm.T);
+        bx[i] = wm.triggers[t]; by[i] = wmLabel(t, K);
+      } else {
+        const j = Math.floor(Math.random() * train.n);
+        bx[i] = train.xs[j]; by[i] = train.ys[j];
+      }
+    }
+    model.trainBatch(bx, by, idx, state.lr, 0);
+    state.epoch += B / train.n;
+  }
+
+  let touched;
+  if (mode === 'lora') {
+    for (let j = 0; j < d.nout; j++) {           // merge B·A into the weights
+      for (let i = 0; i < d.nin; i++) {
+        let s = 0;
+        for (let q = 0; q < rank; q++) s += pB.W[j * rank + q] * pA.W[q * d.nin + i];
+        d.W[j * d.nin + i] += s;
+      }
+    }
+    touched = pA.W.length + pB.W.length;
+    d.lora = null;
+    model.params = saved;
+    model.zeroGrads();
+  } else {
+    touched = model.paramCount();
+  }
+
+  const after = { acc: model.evaluate(test, K, 300).acc, v: wmVerify() };
+  wm.post = { mode, epochs, share, rank, before, after, touched, snap,
+              total: model.paramCount() };
+  return wm.post;
+}
+
+/** Puts the model back the way it was before a post-hoc embedding. */
+function wmUndoPost() {
+  if (!wm.post) return;
+  wmRestore(wm.post.snap);
+  if (model.dense) model.dense.lora = null;
+  wm.post = null;
+  wmVerify();
+}
+
 /* ------------------------------------------------------------ attacks */
 function wmSnapshot() {
   return model.params.map((p) => ({ W: Float32Array.from(p.W), b: Float32Array.from(p.b) }));

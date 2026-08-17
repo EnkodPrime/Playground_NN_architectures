@@ -1657,6 +1657,18 @@ function renderWmPanel() {
       '<p class="muted">The p-value is P(Bin(' + v.T + ', 1/' + v.K + ') ≥ ' + v.matches +
       ') — the odds a foreign model matches that many labels by chance.</p>';
   }
+  if (wm.post) {
+    const p = wm.post;
+    const drop = (p.before.acc - p.after.acc) * 100;
+    html += '<div class="verdict ' + (p.after.v.p < 1e-6 ? 'yes' : 'no') + '" style="margin-top:8px">' +
+      '<b>' + (p.mode === 'lora' ? 'LoRA rank ' + p.rank : 'Full fine-tune') + ', ' + p.epochs +
+      ' epochs.</b><br>Clean accuracy ' + (p.before.acc * 100).toFixed(1) + '% → ' +
+      (p.after.acc * 100).toFixed(1) + '% (' + (drop >= 0 ? '−' : '+') + Math.abs(drop).toFixed(1) +
+      ' points) · triggers ' + p.before.v.matches + '/' + p.before.v.T + ' → <b>' +
+      p.after.v.matches + '/' + p.after.v.T + '</b><br>Trained parameters: ' + p.touched +
+      ' of ' + p.total + (p.mode === 'lora' ? ' — the base weights never moved until the merge' : '') +
+      '</div>';
+  }
   if (wm.on) {
     html += '<p class="muted">Embedding is on: ' + (wm.rate * 100).toFixed(0) +
       '% of each batch are triggers. Changing the class set changes their labels — ' +
@@ -1887,6 +1899,21 @@ function bindUI() {
   };
   $('wmRate').onchange = (e) => { wm.rate = +e.target.value; renderWmPanel(); };
   $('wmVerifyBtn').onclick = () => { wmVerify(); renderWmPanel(); renderNet(); };
+  $('wmEmbedBtn').onclick = () => {
+    const b = $('wmEmbedBtn');
+    b.textContent = 'Embedding…';
+    setTimeout(() => {
+      wmEmbedPost($('wmPostMode').value, +$('wmPostEp').value, wm.rate, +$('wmRank').value);
+      b.textContent = 'Embed now';
+      $('wmUndoPostBtn').classList.remove('hidden');
+      renderWmPanel(); evaluate(); renderMetrics(); renderNet();
+    }, 10);
+  };
+  $('wmUndoPostBtn').onclick = () => {
+    wmUndoPost();
+    $('wmUndoPostBtn').classList.add('hidden');
+    renderWmPanel(); evaluate(); renderMetrics(); renderNet();
+  };
   $('wmPruneBtn').onclick = () => {
     const b = $('wmPruneBtn');
     b.textContent = 'Working…';
