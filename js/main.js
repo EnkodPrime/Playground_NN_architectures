@@ -222,7 +222,10 @@ function loop() {
   if (stream.on) streamTick();
   if (state.running) {
     trainSlice(stream.on ? 6 : 11);
-    if (frameNo % 5 === 0) { evaluate(); renderMetrics(); }
+    // A full evaluation is a forward pass over 600 windows — far more expensive
+    // than a training batch. Three times a second is plenty for the curves and
+    // leaves the core to the actual training.
+    if (frameNo % 20 === 0) { evaluate(); renderMetrics(); }
   }
   if (frameNo % 2 === 0 || stream.on) renderNet();
   requestAnimationFrame(loop);
