@@ -1779,6 +1779,7 @@ function bindUI() {
     b.onclick = () => {
       const p = b.dataset.preset;
       if (p === 'binary') state.classes = ['clean', 'ripple'];
+      else if (p === 'freq') state.classes = ['clean', 'over', 'under'];
       else if (p === 'four') state.classes = ['clean', 'ripple', 'harm', 'spike'];
       else state.classes = CLASSES.map((c) => c.id);
       buildClassList();

@@ -13,6 +13,8 @@ const CLASSES = [
   { id: 'spike',  name: 'Impulse / transient',    short: 'Spike',  color: '#e0342b' },
   { id: 'sag',    name: 'Voltage sag',            short: 'Sag',    color: '#f59e0b' },
   { id: 'burst',  name: 'EMI burst',              short: 'EMI',    color: '#0e7490' },
+  { id: 'over',   name: 'Overfrequency',          short: 'Over f', color: '#be185d' },
+  { id: 'under',  name: 'Underfrequency',         short: 'Under f', color: '#4d7c0f' },
 ];
 
 const CLASS_INDEX = {};
@@ -49,7 +51,16 @@ function generateSample(classId, opt) {
   // opt.f0 lets the inspector probe a grid at another fundamental while the
   // training set stays where it is. Ripple, impulse and EMI keep their absolute
   // frequencies — they come from switching hardware, not from the mains.
-  const w0 = 2 * Math.PI * (opt.f0 || F0) / SR;
+  /* Off-nominal frequency. Note the size: a 40 ms window resolves ~25 Hz, so the
+   * ±50 mHz a real grid drifts by is far out of reach — Fourier, not the network.
+   * What is left in 40 ms is the phase drift, 14.4° per hertz of offset, so the
+   * deviation here is deliberately gross compared with reality. A real meter
+   * measures frequency over 10 s (IEC 61000-4-30). */
+  let f0 = opt.f0 || F0;
+  if (classId === 'over') f0 += rand(0.5, 2.0) * strength;
+  else if (classId === 'under') f0 -= rand(0.5, 2.0) * strength;
+
+  const w0 = 2 * Math.PI * f0 / SR;
 
   // amplitude envelope (1 everywhere unless there is a sag)
   const env = new Float32Array(WIN).fill(1);
