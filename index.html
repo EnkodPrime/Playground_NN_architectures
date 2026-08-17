@@ -283,6 +283,32 @@
     is exactly the price you pay: false alarms against missed novelties.</p>
 </section>
 
+<section class="oodpanel" id="quantPanel">
+  <div class="oodhead">
+    <h2>Quantisation</h2>
+    <label class="oodsw"><input type="checkbox" id="qOn"> compare against float</label>
+    <label class="ctl inline"><span>Bit width <b id="qBitsVal">8</b></span>
+      <input type="range" id="qBits" min="2" max="16" step="1" value="8">
+    </label>
+    <label class="oodsw"><input type="checkbox" id="qPerCh" checked> per channel</label>
+    <label class="oodsw"><input type="checkbox" id="qSym" checked> symmetric</label>
+    <label class="oodsw"><input type="checkbox" id="qFreeze"> keep weights quantised</label>
+    <button id="qSweepBtn">Bit sweep</button>
+  </div>
+  <div class="oodgrid">
+    <canvas id="qSweep" class="chart"></canvas>
+    <div id="qStats" class="oodstats"></div>
+  </div>
+  <canvas id="qHist" class="chart"></canvas>
+  <p class="hint">Training always runs in float32; the panel quantises a copy and evaluates it
+    alongside, so the cost of every bit width is visible while the network learns. Weights only —
+    activations stay in float, which is what weight-only quantisation means on a microcontroller.
+    The histogram shows one weight tensor with the quantisation levels drawn over it: when the red
+    grid gets coarser than the spread of the weights, accuracy starts to go. Turning on
+    <b>keep weights quantised</b> leaves them rounded in place, so the kernels in the diagram and
+    every number in the arithmetic panel become the values a fixed-point device would actually use.</p>
+</section>
+
 <section class="wmpanel" id="wmPanel">
   <div class="wmhead">
     <h2>Watermark (black-box)</h2>
@@ -410,6 +436,7 @@
 <script src="js/stream.js?v=5"></script>
 <script src="js/ood.js?v=5"></script>
 <script src="js/watermark.js?v=5"></script>
+<script src="js/quant.js?v=5"></script>
 <script src="js/main.js?v=5"></script>
 </body>
 </html>

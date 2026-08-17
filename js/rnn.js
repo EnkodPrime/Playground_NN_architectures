@@ -13,7 +13,7 @@ function makeParam(rows, cols, scale, nbias) {
   for (let i = 0; i < W.length; i++) W[i] = randn() * scale;
   const b = new Float32Array(nbias || 0);
   return {
-    W, b,
+    W, b, rows, cols,
     gW: new Float32Array(W.length), gb: new Float32Array(b.length),
     mW: new Float32Array(W.length), vW: new Float32Array(W.length),
     mb: new Float32Array(b.length), vb: new Float32Array(b.length),

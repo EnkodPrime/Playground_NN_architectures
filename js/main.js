@@ -141,6 +141,9 @@ function rebuildModel() {
     const st = model.stages[state.selected.layer];
     if (!st || state.selected.ch >= st.C) state.selected = null;
   }
+  // the float snapshot belongs to the previous parameter objects
+  quant.fp = null; quant.frozen = false; quant.metrics = null; quant.sweep = null;
+  const fz = $('qFreeze'); if (fz) fz.checked = false;
   state.epoch = 0;
   hTrain = []; hTest = [];
   lastMetrics = null;
@@ -388,6 +391,8 @@ function renderMetrics() {
   const ch = Math.min(220, 44 + k * 26);
   const cctx = dpiSetup(cc, cw, ch);
   drawConfusion(cctx, cw, ch, lastMetrics.test.conf, activeClasses(), ood.on);
+
+  if (quant.on) { quantEvaluate(); renderQuantPanel(); }
 }
 
 /* ----------------------------------------------------------- inspector */
@@ -1584,6 +1589,48 @@ function onDataStructureChanged() {
   renderNet();
 }
 
+/* ---------------------------------------------------- quantisation panel */
+function renderQuantPanel() {
+  $('qBitsVal').textContent = quant.bits;
+  const sw = $('qSweep');
+  drawQuantSweep(dpiSetup(sw, sw.clientWidth || 460, 170), sw.clientWidth || 460, 170);
+
+  // the biggest weight tensor is the most interesting one to look at
+  let big = null;
+  if (model) for (const p of model.params) if (!big || p.W.length > big.W.length) big = p;
+  const hs = $('qHist');
+  drawQuantHist(dpiSetup(hs, hs.clientWidth || 600, 96), hs.clientWidth || 600, 96, big);
+
+  const host = $('qStats');
+  const m = quant.metrics;
+  if (!quant.on || !m) {
+    host.innerHTML = '<p class="muted">Tick <b>compare against float</b> to evaluate a quantised ' +
+      'copy next to the float model on every metrics update, or press <b>Bit sweep</b> for the ' +
+      'whole curve at once.</p>';
+    return;
+  }
+  const drop = (m.fpAcc - m.qAcc) * 100;
+  let sq = 0;
+  for (const v of m.sqnr) if (isFinite(v)) sq = sq === 0 ? v : Math.min(sq, v);
+  const bytesFp = model.paramCount() * 4;
+  const bytesQ = Math.ceil(model.paramCount() * quant.bits / 8);
+  host.innerHTML =
+    '<div class="verdict ' + (drop < 1 ? 'yes' : 'no') + '">' +
+    (drop < 1
+      ? '<b>' + quant.bits + ' bits is free here.</b> The drop is within evaluation noise.'
+      : '<b>' + quant.bits + ' bits costs ' + drop.toFixed(1) + ' points.</b>') +
+    '</div><table>' +
+    '<tr><td>float32 accuracy</td><td>' + (m.fpAcc * 100).toFixed(1) + '%</td></tr>' +
+    '<tr><td>quantised accuracy</td><td>' + (m.qAcc * 100).toFixed(1) + '%</td></tr>' +
+    '<tr><td>test loss, float → int</td><td>' + m.fpLoss.toFixed(3) + ' → ' + m.qLoss.toFixed(3) + '</td></tr>' +
+    '<tr><td>worst tensor SQNR</td><td>' + (isFinite(sq) ? sq.toFixed(1) + ' dB' : '—') + '</td></tr>' +
+    '<tr><td>weight memory</td><td>' + bytesFp + ' → ' + bytesQ + ' B</td></tr>' +
+    '</table>' +
+    '<p class="muted">SQNR is the signal-to-quantisation-noise ratio of the worst weight tensor; ' +
+    'each extra bit is worth about 6 dB. Memory counts weights only, at ' + quant.bits +
+    ' bits each against 32.</p>';
+}
+
 /* ------------------------------------------------------ watermark panel */
 function renderWmPanel() {
   const host = $('wmStats');
@@ -1782,6 +1829,51 @@ function bindUI() {
     }, 10);
   };
 
+  // --- quantisation
+  $('qOn').onchange = (e) => {
+    quant.on = e.target.checked;
+    if (!quant.on && quant.frozen) {           // put the float weights back
+      if (quant.fp) { quantLoadFp(quant.fp); quant.fp = null; }
+      quant.frozen = false; $('qFreeze').checked = false;
+    }
+    if (quant.on) quantEvaluate();
+    renderQuantPanel(); renderNet();
+  };
+  $('qBits').oninput = (e) => {
+    quant.bits = +e.target.value;
+    if (quant.frozen && quant.fp) { quantLoadFp(quant.fp); quantiseModel(quant.bits); }
+    if (quant.on) quantEvaluate();
+    renderQuantPanel(); renderNet();
+  };
+  const qRe = () => {
+    if (quant.frozen && quant.fp) { quantLoadFp(quant.fp); quantiseModel(quant.bits); }
+    if (quant.on) quantEvaluate();
+    renderQuantPanel(); renderNet();
+  };
+  $('qPerCh').onchange = (e) => { quant.perChannel = e.target.checked; qRe(); };
+  $('qSym').onchange = (e) => { quant.symmetric = e.target.checked; qRe(); };
+  $('qFreeze').onchange = (e) => {
+    if (e.target.checked) {
+      quant.fp = quantSaveFp();
+      quantiseModel(quant.bits);
+      quant.frozen = true;
+    } else {
+      if (quant.fp) quantLoadFp(quant.fp);
+      quant.fp = null; quant.frozen = false;
+    }
+    if (quant.on) quantEvaluate();
+    evaluate(); renderMetrics(); renderQuantPanel(); renderNet();
+  };
+  $('qSweepBtn').onclick = () => {
+    const b = $('qSweepBtn');
+    b.textContent = 'Working…';
+    setTimeout(() => {
+      quantSweep();
+      b.textContent = 'Bit sweep';
+      renderQuantPanel();
+    }, 10);
+  };
+
   // --- watermark
   $('wmOn').onchange = (e) => { wm.on = e.target.checked; renderWmPanel(); };
   $('wmKey').onchange = (e) => {
@@ -1876,6 +1968,7 @@ function init() {
   renderMetrics();
   renderOodPanel(true);
   renderWmPanel();
+  renderQuantPanel();
   renderNet();
   requestAnimationFrame(loop);
 }

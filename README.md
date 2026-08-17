@@ -109,6 +109,15 @@ novelty score over the logits or features — energy, entropy, max-softmax or k-
 threshold calibrated against the classes you left out, reported as AUC, true-positive and
 false-alarm rates.
 
+**Quantisation.** Post-training weight quantisation as a live experiment: training stays in
+float32 while a quantised copy is evaluated beside it on every metrics update, so the cost of each
+bit width is visible as the network learns. Bit width 2–16, per-tensor or per-channel scales,
+symmetric or asymmetric, with a bit sweep, the signal-to-quantisation-noise ratio of the worst
+tensor and the resulting weight memory. A weight histogram is drawn with the quantisation levels
+over it. Switching on *keep weights quantised* leaves the rounded values in place, so the kernels
+in the diagram and every number in the arithmetic panel become what a fixed-point device would
+actually use.
+
 **Watermark.** A black-box ownership watermark: a key-derived set of physically impossible
 trigger signals with pseudo-random labels, embedded during training and verified with an exact
 binomial test. Includes pruning and fine-tuning attacks to see how much of it survives.
@@ -127,6 +136,7 @@ binomial test. Includes pruning and fine-tuning attacks to see how much of it su
 | `js/stream.js` | live generator, scope and decision ribbon |
 | `js/ood.js` | novelty scores, calibration, AUC, histograms |
 | `js/watermark.js` | trigger watermark, binomial test, attacks |
+| `js/quant.js` | post-training weight quantisation, bit sweep, histograms |
 | `js/main.js` | state, UI, training loop, arithmetic panel |
 
 ## Contributing

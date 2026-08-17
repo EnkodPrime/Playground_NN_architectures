@@ -15,6 +15,7 @@ class Conv1D {
     this.pad = k >> 1;                       // 'same' zero padding
     this.W = new Float32Array(cout * cin * k);
     this.b = new Float32Array(cout);
+    this.rows = cout; this.cols = cin * k;     // grouping for per-channel quantisation
     heInit(this.W, cin * k);
     this.gW = new Float32Array(this.W.length);
     this.gb = new Float32Array(cout);
@@ -201,6 +202,7 @@ class Dense {
     this.nin = nin; this.nout = nout;
     this.W = new Float32Array(nout * nin);
     this.b = new Float32Array(nout);
+    this.rows = nout; this.cols = nin;
     heInit(this.W, nin);
     this.gW = new Float32Array(this.W.length);
     this.gb = new Float32Array(nout);
