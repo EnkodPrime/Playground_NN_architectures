@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1D CNN Playground — power-line disturbances</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">∿</span>
+    <div>
+      <h1>1D CNN Playground</h1>
+      <p>Classifying disturbances in mains voltage — in the browser, no libraries</p>
+    </div>
+  </div>
+  <div class="epochbox">
+    <span class="lbl">Epoch</span>
+    <span id="epoch" class="val">000,000</span>
+  </div>
+</header>
+
+<section class="toolbar">
+  <button id="btnPlay" class="play" title="Run / pause">▶</button>
+  <button id="btnStep" class="icon" title="One epoch">⏭</button>
+  <button id="btnReset" class="icon" title="Reset the weights">⟳</button>
+
+  <label class="ctl"><span>Learning rate</span>
+    <select id="lr">
+      <option>0.0003</option><option>0.001</option><option selected>0.003</option>
+      <option>0.01</option><option>0.03</option><option>0.1</option>
+    </select>
+  </label>
+
+  <label class="ctl"><span>Activation</span>
+    <select id="act">
+      <option value="relu" selected>ReLU</option>
+      <option value="tanh">Tanh</option>
+      <option value="leaky">Leaky ReLU</option>
+      <option value="abs">Abs (envelope detector)</option>
+    </select>
+  </label>
+
+  <label class="ctl"><span>L2 regularisation</span>
+    <select id="l2">
+      <option value="0" selected>0</option>
+      <option value="0.0001">0.0001</option>
+      <option value="0.001">0.001</option>
+      <option value="0.01">0.01</option>
+    </select>
+  </label>
+
+  <label class="ctl"><span>Batch size</span>
+    <select id="batch">
+      <option>4</option><option>8</option><option selected>16</option><option>32</option>
+    </select>
+  </label>
+
+  <label class="ctl"><span>Output head</span>
+    <select id="head">
+      <option value="gap" selected>Global Avg Pool</option>
+      <option value="gmp">Global Max Pool</option>
+      <option value="flat">Flatten</option>
+    </select>
+  </label>
+
+  <label class="ctl"><span>Feature maps</span>
+    <select id="mode">
+      <option value="time" selected>Time</option>
+      <option value="freq">Spectrum</option>
+    </select>
+  </label>
+</section>
+
+<main class="grid">
+
+  <!-- ============================= DATA ============================= -->
+  <aside class="panel">
+    <h2>Data</h2>
+    <p class="hint">Every example is a window of 128 samples (40&nbsp;ms at 3.2&nbsp;kHz) of
+      50&nbsp;Hz mains voltage. Pick which disturbances the network should tell apart.</p>
+
+    <div class="presets">
+      <button data-preset="binary">Clean / Ripple</button>
+      <button data-preset="four">4 classes</button>
+      <button data-preset="all">All 6</button>
+    </div>
+
+    <div id="classList" class="classlist"></div>
+
+    <label class="slider">
+      <span>Background noise <b id="noiseVal">0.04</b></span>
+      <input type="range" id="noise" min="0" max="0.25" step="0.005" value="0.04">
+    </label>
+
+    <label class="slider">
+      <span>Disturbance strength <b id="strVal">1.00</b></span>
+      <input type="range" id="strength" min="0.3" max="1.6" step="0.05" value="1.0">
+    </label>
+
+    <label class="slider">
+      <span>Training examples <b id="ntrainVal">480</b></span>
+      <input type="range" id="ntrain" min="120" max="1200" step="60" value="480">
+    </label>
+
+    <button id="btnData" class="wide">Regenerate data</button>
+    <p class="hint small">The test set is 40% of the training size and is generated separately.</p>
+  </aside>
+
+  <!-- ========================== ARCHITECTURE ========================== -->
+  <section class="panel center">
+    <div class="centerhead">
+      <h2>Architecture</h2>
+      <div class="layerbtns">
+        <span>Convolutional layers</span>
+        <button id="layMinus">−</button>
+        <b id="layCount">2</b>
+        <button id="layPlus">+</button>
+        <span class="params" id="paramCount">— parameters</span>
+      </div>
+    </div>
+    <div id="netWrap" class="netwrap">
+      <div id="layerControls" class="layerctl"></div>
+      <canvas id="net"></canvas>
+    </div>
+    <p class="hint">Each box is one filter — inside it is that filter's output map for the current
+      example, and in the top-left corner the learned kernel itself. Link thickness is weight
+      magnitude (<span class="sw pos"></span> positive, <span class="sw neg"></span> negative).
+      Hover for a quick look, <b>click</b> a node for the full arithmetic below.</p>
+  </section>
+
+  <!-- ============================ RESULTS ============================ -->
+  <aside class="panel">
+    <h2>Results</h2>
+    <div class="metrics">
+      <div><span class="lbl">Training loss</span><span id="lossTrain" class="val">—</span></div>
+      <div><span class="lbl">Test loss</span><span id="lossTest" class="val red">—</span></div>
+      <div><span class="lbl">Test accuracy</span><span id="accTest" class="val big">—</span></div>
+      <div id="rejRow" class="hidden"><span class="lbl">Rejected as unknown</span><span id="rejVal" class="val">—</span></div>
+    </div>
+    <canvas id="loss" class="chart"></canvas>
+    <div class="legend"><span class="dot blue"></span>training <span class="dot red"></span>test</div>
+
+    <h3>Confusion matrix (test, %)</h3>
+    <canvas id="conf" class="chart"></canvas>
+
+    <h3>Inspector</h3>
+    <div class="probe">
+      <select id="probeClass"></select>
+      <button id="btnProbe">New example</button>
+    </div>
+    <button id="btnQuick" class="wide small">Quick test · 50 examples</button>
+    <div id="qtResult" class="qt"></div>
+
+    <details class="custom">
+      <summary>Custom signal (CSV)</summary>
+      <textarea id="csvIn" placeholder="Numbers separated by commas, spaces or newlines.&#10;Ideally 128 values = 40 ms (2 cycles of 50 Hz); any other count is resampled."></textarea>
+      <label class="csvopt"><input type="checkbox" id="csvNorm" checked> remove DC and normalise to amplitude 1</label>
+      <button id="csvLoad" class="wide small">Load as example</button>
+      <p id="csvMsg" class="hint small"></p>
+    </details>
+
+    <canvas id="inspect" class="chart"></canvas>
+    <p id="inspectText" class="hint small">Hover a filter in the network to see its kernel,
+      its frequency response and its output map.</p>
+  </aside>
+</main>
+
+<section class="streampanel" id="streamPanel">
+  <div class="streamhead">
+    <h2>Live stream</h2>
+    <button id="strToggle" class="strplay">▶ Start stream</button>
+    <label class="ctl inline"><span>Speed</span>
+      <select id="strSpeed">
+        <option value="4">×0.08 (very slow)</option>
+        <option value="12" selected>×0.23</option>
+        <option value="27">×0.5</option>
+        <option value="53">real time</option>
+      </select>
+    </label>
+    <div class="gen">
+      <span class="genlbl">Inject disturbances:</span>
+      <label><input type="checkbox" id="ctlRipple"> Ripple</label>
+      <label><input type="checkbox" id="ctlHarm"> Harmonics</label>
+      <label><input type="checkbox" id="ctlSag"> Sag</label>
+      <button id="ctlSpike">⚡ Impulse</button>
+      <button id="ctlBurst">EMI burst</button>
+      <label id="csvSrcWrap" class="hidden"><input type="checkbox" id="ctlCsvSrc"> from custom signal</label>
+    </div>
+  </div>
+  <div id="strStatus" class="strstatus">Stream stopped.</div>
+  <canvas id="scope" class="chart"></canvas>
+  <canvas id="ribbon" class="chart"></canvas>
+  <p class="hint">On top is the signal as it flows — the blue band on the right is the 128-sample
+    window handed to the network on every frame. Below is its decision over time: one column per
+    frame, coloured by class probability, and the thin strip underneath turns green whenever the
+    predicted class matches what you actually injected.</p>
+</section>
+
+<section class="oodpanel" id="oodPanel">
+  <div class="oodhead">
+    <h2>The "unknown" state</h2>
+    <label class="oodsw"><input type="checkbox" id="oodOn"> enable</label>
+    <label class="ctl inline"><span>Novelty score</span>
+      <select id="oodScore">
+        <option value="energy" selected>Energy −log Σ exp(z)</option>
+        <option value="msp">1 − max softmax</option>
+        <option value="ent">Normalised entropy</option>
+        <option value="knn">k-NN in feature space</option>
+      </select>
+    </label>
+    <label class="ctl inline"><span>Threshold <b id="oodThrVal">—</b></span>
+      <input type="range" id="oodThr" min="0" max="1" step="0.001" value="0.5">
+    </label>
+    <label class="ctl inline"><span>Policy</span>
+      <select id="oodTarget">
+        <option value="0.01">1% false alarms</option>
+        <option value="0.05" selected>5% false alarms</option>
+        <option value="0.1">10% false alarms</option>
+        <option value="youden">max separation (Youden)</option>
+      </select>
+    </label>
+    <button id="oodCal">Calibrate</button>
+  </div>
+  <div class="oodgrid">
+    <canvas id="oodHist" class="chart"></canvas>
+    <div id="oodStats" class="oodstats"></div>
+  </div>
+  <p class="hint">Softmax is normalised — it measures which of the <i>known</i> classes fits best,
+    not whether anything fits at all. So "unknown" needs a separate score over the logits or the
+    features, plus a threshold. Calibration runs the score over the test set (trained classes) and
+    over the classes you left out (never seen by the network) — the overlap of the two histograms
+    is exactly the price you pay: false alarms against missed novelties.</p>
+</section>
+
+<section class="wmpanel" id="wmPanel">
+  <div class="wmhead">
+    <h2>Watermark (black-box)</h2>
+    <label class="oodsw"><input type="checkbox" id="wmOn"> embed while training</label>
+    <label class="ctl inline"><span>Secret key</span><input type="text" id="wmKey" value="playground-key"></label>
+    <label class="ctl inline"><span>Triggers</span>
+      <select id="wmT"><option>20</option><option selected>40</option><option>80</option></select>
+    </label>
+    <label class="ctl inline"><span>Share per batch</span>
+      <select id="wmRate">
+        <option value="0.03">3%</option><option value="0.05">5%</option>
+        <option value="0.1" selected>10%</option><option value="0.2">20%</option>
+      </select>
+    </label>
+    <button id="wmVerifyBtn">Verify model</button>
+    <button id="wmPruneBtn">Pruning test</button>
+    <button id="wmFtBtn">Attack: 20 clean epochs</button>
+    <button id="wmUndoBtn" class="hidden">Restore weights</button>
+  </div>
+  <div class="wmgrid">
+    <div>
+      <div id="wmStats" class="oodstats"></div>
+      <canvas id="wmSig" class="chart"></canvas>
+    </div>
+    <canvas id="wmSweep" class="chart"></canvas>
+  </div>
+  <p class="hint">Triggers are derived from the key: a clean sine plus 2–3 interharmonics locked
+    exactly +18.5&nbsp;Hz above a harmonic with a fixed phase — a combination no real grid produces,
+    so the deliberate misclassification never fires in the field. Each trigger gets a key-derived
+    pseudo-random label, which makes the signature the <i>pattern of answers</i> rather than one
+    single class: guessing that a trigger set exists does not reveal the mapping.</p>
+</section>
+
+<section class="mathpanel" id="mathPanel">
+  <div class="mathhead">
+    <h2 id="mathTitle">Arithmetic of the selected node</h2>
+    <div class="posctl">
+      <label>Position <b id="tposVal">t = 64</b></label>
+      <input type="range" id="tpos" min="0" max="127" value="64">
+      <button id="btnClearSel">Clear selection</button>
+    </div>
+  </div>
+  <div id="mathBody" class="mathbody"></div>
+</section>
+
+<footer class="notes">
+  <h3>Things to try</h3>
+  <ul>
+    <li><b>Ripple vs clean</b> — two filters with K=5 in a single layer are enough. Switch the maps
+      to “Spectrum” to watch the filter turn into a band detector around 400–900&nbsp;Hz.</li>
+    <li><b>Impulses</b> — pick the <i>Global Max Pool</i> head: it reacts to a single position in the
+      window instead of the average, which is exactly the right logic for a transient.</li>
+    <li><b>Voltage sag</b> — ReLU with average pooling reaches roughly 90%, while the <i>Abs</i>
+      activation goes past 97%: it turns the filter into an envelope detector. Global Max Pool fails
+      here, since a maximum cannot see a dip.</li>
+    <li><b>Harmonics</b> — longer kernels (K=9 over K=5) help, because the receptive field has to
+      cover a decent part of the cycle. The inspector shows its value.</li>
+    <li><b>All six classes</b> — with 2×4 filters the network stalls near 60%; give it 2×8 filters
+      and a learning rate of 0.01 and it clears 90%.</li>
+    <li>Raise the <b>background noise</b> to 0.15 and watch the gap between training and test loss
+      open up — that is overfitting; push back with L2.</li>
+  </ul>
+</footer>
+
+<script src="js/signal.js"></script>
+<script src="js/fft.js"></script>
+<script src="js/nn.js"></script>
+<script src="js/viz.js"></script>
+<script src="js/stream.js"></script>
+<script src="js/ood.js"></script>
+<script src="js/watermark.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
