@@ -20,6 +20,7 @@
     <button id="archCnn" class="on" role="tab">1D CNN Playground</button>
     <button id="archRnn" role="tab">RNN Playground</button>
     <button id="archSsm" role="tab">S4 / Mamba Playground</button>
+    <button id="archGnn" role="tab">GNN Playground</button>
   </nav>
   <div class="epochbox">
     <span class="lbl">Epoch</span>
@@ -89,6 +90,14 @@
   <label class="ctl ssmonly"><span>State dim N</span>
     <select id="stateDim">
       <option>4</option><option selected>8</option><option>16</option>
+    </select>
+  </label>
+
+  <label class="ctl gnnonly"><span>Aggregation</span>
+    <select id="agg">
+      <option value="mean" selected>Mean of neighbours</option>
+      <option value="max">Max of neighbours</option>
+      <option value="sum">Sum of neighbours</option>
     </select>
   </label>
 
@@ -320,6 +329,23 @@
 </section>
 
 <footer class="notes">
+  <h3 class="gnnonly">Things to try — GNN</h3>
+  <ul class="gnnonly">
+    <li><b>The graph is not given, it is built.</b> A single voltage window has no natural graph, so
+      the signal makes one: sample i sees sample j when everything between them is lower. Nothing
+      here is learned — the topology is a function of the waveform.</li>
+    <li><b>Look at the arc diagram</b> in the inspector while switching the example class. A clean
+      sine gives an almost regular graph with max degree around 8; a single impulse becomes a hub
+      that sees roughly twice as far. That difference is what the network reads.</li>
+    <li><b>Aggregation matters.</b> Mean smooths the neighbourhood, max picks the loudest neighbour
+      — which suits impulses, since a hub node then inherits the peak directly.</li>
+    <li><b>Two layers reach two hops.</b> With one layer a node only knows its neighbours; add a
+      layer and information travels one hop further. Click a channel in layer 2 and compare its
+      inputs with layer 1.</li>
+    <li>Node features are only value, step difference and magnitude — no frequency information at
+      all. Whatever the network learns about ripple or harmonics has to come through the topology.</li>
+  </ul>
+
   <h3 class="ssmonly">Things to try — S4 / Mamba</h3>
   <ul class="ssmonly">
     <li><b>S4D is a convolution in disguise.</b> Nothing in it depends on the input, so the whole
@@ -379,6 +405,7 @@
 <script src="js/nn.js"></script>
 <script src="js/rnn.js"></script>
 <script src="js/ssm.js"></script>
+<script src="js/gnn.js"></script>
 <script src="js/viz.js"></script>
 <script src="js/stream.js"></script>
 <script src="js/ood.js"></script>

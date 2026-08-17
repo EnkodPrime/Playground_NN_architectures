@@ -182,13 +182,19 @@ function stageLink(model, li, co, ci) {
     const w = st.layer.pin.W[co * st.layer.D + ci];
     return { mag: Math.abs(w), sign: w >= 0 ? 1 : -1 };
   }
+  if (st.gnn) {
+    const D = st.layer.D;
+    const ws = st.layer.pself.W[co * D + ci], wn = st.layer.pneigh.W[co * D + ci];
+    return { mag: (Math.abs(ws) + Math.abs(wn)) / 2, sign: ws + wn >= 0 ? 1 : -1 };
+  }
   return rnnLinkStrength(st, co, ci);
 }
 
 function stageInputCount(model, li) {
   const st = model.stages[li];
   if (st.conv) return st.conv.cin;
-  return st.ssm ? st.layer.D : st.layer.fwd.D;
+  if (st.ssm || st.gnn) return st.layer.D;
+  return st.layer.fwd.D;
 }
 
 function outLinkStrength(model, ci) {
@@ -269,6 +275,8 @@ function drawNetwork(ctx, o) {
     if (snap) for (let i = 0; i < snap.length; i++) scale = Math.max(scale, Math.abs(snap[i]));
     label(ctx, col.x, col.nodes[0].y - 8, st.conv
       ? 'LAYER ' + (li + 1) + ' · K=' + st.conv.k + (st.pooled ? ' · pool' : '')
+      : st.gnn
+        ? 'LAYER ' + (li + 1) + ' · GNN · ' + st.layer.agg
       : st.ssm
         ? 'LAYER ' + (li + 1) + ' · ' + (st.kind === 's4' ? 'S4D' : 'MAMBA') + ' · N=' + st.layer.N
         : 'LAYER ' + (li + 1) + ' · ' + st.kind.toUpperCase() + (st.bidir ? ' · bi' : ''));

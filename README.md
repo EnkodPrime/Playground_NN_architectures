@@ -10,6 +10,7 @@ Three architectures share the same data, metrics and tooling, switchable at the 
 * **RNN** — recurrent cells over the same window: simple tanh RNN, GRU or LSTM
 * **S4 / Mamba** — state space models: S4D (diagonal, time-invariant) and a Mamba-style
   selective SSM
+* **GNN** — message passing over the visibility graph the signal builds for itself
 
 Everything runs in the browser. No dependencies, no build step, no server.
 
@@ -63,7 +64,14 @@ model is no longer time-invariant and has no fixed kernel; the inspector shows �
 block also carries the short causal depthwise convolution and the SiLU gate branch of the original,
 without which a real-diagonal state is only a running average and cannot resolve a frequency.
 
-All three feed a linear layer and softmax, and are trained with **Adam** and cross-entropy plus
+**Graph.** A single window comes with no graph, so one is derived from it: in a horizontal
+visibility graph two samples are connected when everything between them is lower than both
+(Luque et al. 2009). Shape becomes topology — a clean sine yields an almost regular graph with
+max degree around 8, while a lone impulse becomes a hub of degree 16. Node features are only the
+value, its step difference and its magnitude; 1–3 message passing layers then aggregate over
+neighbours by mean, max or sum. The inspector draws the graph as an arc diagram above the signal.
+
+All of them feed a linear layer and softmax, and are trained with **Adam** and cross-entropy plus
 optional L2. Forward and backward passes are written from scratch in `js/nn.js`, `js/rnn.js` and
 `js/ssm.js` — convolution, pooling, three recurrent cells, both state space variants, dense layer
 and softmax, all over flat `Float32Array`s indexed as `[channel * length + t]`. Every gradient,
@@ -114,6 +122,7 @@ binomial test. Includes pruning and fine-tuning attacks to see how much of it su
 | `js/nn.js` | convolutional layers, forward/backprop, Adam, evaluation |
 | `js/rnn.js` | RNN / GRU / LSTM cells, BPTT, gradient clipping, readouts |
 | `js/ssm.js` | S4D and selective (Mamba) state space layers, kernel extraction |
+| `js/gnn.js` | visibility graph construction, message passing, arc diagram |
 | `js/viz.js` | layout and canvas drawing |
 | `js/stream.js` | live generator, scope and decision ribbon |
 | `js/ood.js` | novelty scores, calibration, AUC, histograms |

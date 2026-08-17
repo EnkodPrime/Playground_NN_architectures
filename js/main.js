@@ -9,6 +9,8 @@ const state = {
   ],
   rnnLayers: [{ units: 8, bidir: false }],
   ssmLayers: [{ units: 6 }],
+  gnnLayers: [{ units: 8 }, { units: 8 }],
+  agg: 'mean',
   cell: 'gru',
   ssmMode: 's4',
   stateDim: 8,
@@ -95,7 +97,8 @@ function probeInfo() {
 /** The layer list of whichever architecture is active. */
 function archLayers() {
   if (state.arch === 'cnn') return state.layers;
-  return state.arch === 'rnn' ? state.rnnLayers : state.ssmLayers;
+  if (state.arch === 'rnn') return state.rnnLayers;
+  return state.arch === 'ssm' ? state.ssmLayers : state.gnnLayers;
 }
 
 function rebuildModel() {
@@ -111,6 +114,14 @@ function rebuildModel() {
     model = new RNNNet({
       cell: state.cell,
       layers: JSON.parse(JSON.stringify(state.rnnLayers)),
+      readout: state.readout,
+      nClasses: activeClasses().length,
+      inputLen: WIN,
+    });
+  } else if (state.arch === 'gnn') {
+    model = new GNNNet({
+      layers: JSON.parse(JSON.stringify(state.gnnLayers)),
+      agg: state.agg,
       readout: state.readout,
       nClasses: activeClasses().length,
       inputLen: WIN,
@@ -147,8 +158,10 @@ function setArch(arch) {
   $('archCnn').classList.toggle('on', arch === 'cnn');
   $('archRnn').classList.toggle('on', arch === 'rnn');
   $('archSsm').classList.toggle('on', arch === 'ssm');
+  $('archGnn').classList.toggle('on', arch === 'gnn');
   $('layerLbl').textContent = arch === 'cnn' ? 'Convolutional layers'
-    : arch === 'rnn' ? 'Recurrent layers' : 'State space layers';
+    : arch === 'rnn' ? 'Recurrent layers'
+      : arch === 'ssm' ? 'State space layers' : 'Message passing layers';
   setStream(false);
   ood.cal = null; ood.stats = null;
   wm.last = null; wm.sweep = null;
@@ -391,6 +404,30 @@ function drawInspector(probs, oodInfo) {
   const title = (s, y) => { ctx.fillStyle = '#7b8794'; ctx.font = '600 10px system-ui,sans-serif'; ctx.fillText(s, 0, y); };
 
   const h0 = state.hover;
+  if (model.kind === 'gnn' && model.graph) {
+    // the graph is the same for every channel, so always show it
+    const g = model.graph;
+    let edges = 0, mxd = 0;
+    for (let i = 0; i < WIN; i++) { edges += g.deg[i]; mxd = Math.max(mxd, g.deg[i]); }
+    edges /= 2;
+    title('VISIBILITY GRAPH OF THIS WINDOW', 10);
+    drawGraphArcs(ctx, 0, 14, w, 96, g, state.probe, WIN,
+      h0 && h0.type === 'filter' ? state.tPos : null);
+    title('DEGREE PER NODE', 118);
+    const degf = new Float64Array(WIN);
+    for (let i = 0; i < WIN; i++) degf[i] = g.deg[i];
+    drawSpectrum(ctx, 0, 122, w, 42, degf, mxd);
+    const pinfo = probeInfo();
+    txt.innerHTML = '<b>' + pinfo.name + '</b> · ' + edges + ' edges · mean degree ' +
+      (2 * edges / WIN).toFixed(2) + ' · <b>max degree ' + mxd + '</b>' +
+      '<br>The signal builds its own graph: a sample sees another when everything between them ' +
+      'is lower. A lone impulse turns into a hub — max degree runs about twice as high for an ' +
+      'impulse as for a clean sine, and that is structure the network can read.' +
+      (h0 && h0.type === 'filter'
+        ? '<br>Node ' + state.tPos + ' and its edges are marked; click a channel for the arithmetic.'
+        : '<br>Click a channel below to expand the message passing for one node.');
+    return;
+  }
   if (h0 && h0.type === 'filter' && model.kind === 'ssm') {
     const st = model.stages[h0.layer];
     const layer = st.layer;
@@ -662,6 +699,7 @@ function renderMathInner(host) {
   }
   if (sel.type === 'filter') {
     if (model.kind === 'rnn') renderUnitMath(host, title, slider, sel);
+    else if (model.kind === 'gnn') renderGnnMath(host, title, slider, sel);
     else if (model.kind === 'ssm') renderSsmMath(host, title, slider, sel);
     else renderFilterMath(host, title, slider, sel);
   }
@@ -778,6 +816,82 @@ function renderUnitMath(host, title, slider, sel) {
 
   /* --- 5. downstream --- */
   html += rnnDownstreamHtml(li, unit);
+  host.innerHTML = html;
+}
+
+/* ------------------------------------------------------- graph node/channel */
+function renderGnnMath(host, title, slider, sel) {
+  const li = sel.layer, ch = sel.ch;
+  const st = model.stages[li];
+  if (!st || ch >= st.C) { state.selected = null; return renderMathInner(host); }
+
+  slider.disabled = false;
+  slider.max = WIN - 1;
+  const node = Math.min(state.tPos, WIN - 1);
+  state.tPos = node;
+  slider.value = node;
+  $('tposVal').textContent = 'node ' + node + '  (' + (node / SR * 1000).toFixed(2) + ' ms)';
+  title.textContent = 'Layer ' + (li + 1) + ' · channel ' + (ch + 1) + ' · node ' + node;
+
+  const d = model.stepDetail(li, ch, node);
+  const fnames = li === 0 ? ['x', 'Δx', '|x|'] : null;
+  const fname = (i) => fnames ? fnames[i] : 'h' + i;
+
+  let html = '<h4>1 · The graph</h4>';
+  html += '<div class="formula">Two samples i &lt; j are neighbours when every sample between ' +
+    'them is lower than both — a horizontal visibility graph. Nothing is learned here; the ' +
+    'topology is a function of the waveform.</div>';
+  html += '<div class="formula" style="margin-top:6px">Node <b>' + node + '</b> has degree ' +
+    '<span class="res">' + d.degree + '</span>: neighbours ' +
+    (d.neigh.length ? d.neigh.join(', ') : '—') +
+    '  <span class="op">— an impulse becomes a hub that sees most of the window; a clean sine ' +
+    'gives an almost regular graph</span></div>';
+
+  html += '<h4>2 · Message passing</h4>';
+  html += '<div class="formula">h′<sub>i</sub> = ReLU( W<sub>self</sub>·h<sub>i</sub> + ' +
+    'W<sub>neigh</sub>·' + d.agg_kind + '<sub>j∈N(i)</sub>(h<sub>j</sub>) + b )</div>';
+
+  html += '<div class="scrollx" style="margin-top:8px"><table class="mtab"><thead><tr>' +
+    '<th>input</th><th>own value</th><th>W<sub>self</sub></th><th>product</th>' +
+    '<th>' + d.agg_kind + ' of neighbours</th><th>W<sub>neigh</sub></th><th>product</th>' +
+    '</tr></thead><tbody>';
+  let sSelf = 0, sNeigh = 0;
+  for (let i = 0; i < d.D; i++) {
+    const ps = d.ws[i] * d.self[i], pn = d.wn[i] * d.agg[i];
+    sSelf += ps; sNeigh += pn;
+    html += '<tr><td class="ch">' + fname(i) + '</td>' +
+      '<td>' + n3(d.self[i]) + '</td>' +
+      '<td style="color:' + wColor(d.ws[i]) + '">' + n3(d.ws[i]) + '</td>' +
+      '<td>' + n4(ps) + '</td>' +
+      '<td>' + n3(d.agg[i]) + '</td>' +
+      '<td style="color:' + wColor(d.wn[i]) + '">' + n3(d.wn[i]) + '</td>' +
+      '<td class="sum">' + n4(pn) + '</td></tr>';
+  }
+  html += '</tbody></table></div>';
+  html += '<div class="formula" style="margin-top:8px">self ' + n4(sSelf) + '  +  neighbours ' +
+    n4(sNeigh) + '  +  bias ' + n3(d.bias) + '  =  <span class="res">' + n4(d.pre) + '</span>' +
+    '  <span class="op">→</span>  ReLU  <span class="op">→</span>  <span class="res' +
+    (d.out === 0 ? ' warn' : '') + '">' + n4(d.out) + '</span></div>';
+
+  if (d.neigh.length) {
+    html += '<h4>3 · Where the aggregated value came from</h4>';
+    html += '<div class="scrollx"><table class="mtab"><thead><tr><th>neighbour</th>';
+    for (let i = 0; i < d.D; i++) html += '<th>' + fname(i) + '</th>';
+    html += '</tr></thead><tbody>';
+    const src = li === 0 ? model.feat : model.stages[li - 1].snapshot;
+    for (const j of d.neigh.slice(0, 12)) {
+      html += '<tr><td class="ch">node ' + j + '</td>';
+      for (let i = 0; i < d.D; i++) html += '<td>' + n3(src[i * WIN + j]) + '</td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table></div>';
+    if (d.neigh.length > 12) {
+      html += '<div class="formula" style="margin-top:6px"><span class="op">showing 12 of ' +
+        d.neigh.length + ' neighbours</span></div>';
+    }
+  }
+
+  html += rnnDownstreamHtml(li, ch, d.neigh.length ? 4 : 3);
   host.innerHTML = html;
 }
 
@@ -1252,8 +1366,8 @@ function receptiveField(layerIdx) {
 function buildLayerControls() {
   const host = $('layerControls');
   host.innerHTML = '';
-  if (state.arch === 'ssm') {
-    state.ssmLayers.forEach((ls) => {
+  if (state.arch === 'ssm' || state.arch === 'gnn') {
+    archLayers().forEach((ls) => {
       const card = document.createElement('div');
       card.className = 'laycard';
       card.innerHTML = '<div class="row"><button data-a="m">−</button><b>' + ls.units +
@@ -1568,6 +1682,10 @@ function bindUI() {
   $('archCnn').onclick = () => setArch('cnn');
   $('archRnn').onclick = () => setArch('rnn');
   $('archSsm').onclick = () => setArch('ssm');
+  $('archGnn').onclick = () => setArch('gnn');
+  $('agg').onchange = (e) => {
+    state.agg = e.target.value; rebuildModel(); evaluate(); renderMetrics(); renderNet();
+  };
   $('ssmMode').onchange = (e) => {
     state.ssmMode = e.target.value; rebuildModel(); evaluate(); renderMetrics(); renderNet();
   };
