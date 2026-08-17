@@ -4,10 +4,12 @@ An interactive playground for neural network architectures on **signals**, in th
 [TensorFlow Playground](https://playground.tensorflow.org/) but for time series instead of 2D
 points. The task is recognising power-quality disturbances in 50 Hz mains voltage.
 
-Two architectures share the same data, metrics and tooling, switchable at the top of the page:
+Three architectures share the same data, metrics and tooling, switchable at the top of the page:
 
 * **1D CNN** — convolutional filters over the window
 * **RNN** — recurrent cells over the same window: simple tanh RNN, GRU or LSTM
+* **S4 / Mamba** — state space models: S4D (diagonal, time-invariant) and a Mamba-style
+  selective SSM
 
 Everything runs in the browser. No dependencies, no build step, no server.
 
@@ -49,11 +51,28 @@ LSTM cell; readout by last state, mean over time or max over time. Trained by ba
 through all 128 steps, with global gradient-norm clipping — without it the loss oscillates
 instead of converging.
 
-Both feed a linear layer and softmax, and are trained with **Adam** and cross-entropy plus
-optional L2. Forward and backward passes are written from scratch in `js/nn.js` and `js/rnn.js` —
-convolution, pooling, the three recurrent cells, dense layer and softmax, all over flat
-`Float32Array`s indexed as `[channel * length + t]`. The BPTT gradients agree with numeric
-finite differences to within 0.3% at the full sequence length.
+**State space.** 1–2 layers, 1–10 channels each, state dimension N ∈ {4,8,16}.
+
+*S4D* keeps a complex diagonal `A` with the S4D-Lin initialisation and discretises by zero-order
+hold: `Ā = exp(ΔA)`, `B̄ = (Ā−1)/A`. Nothing depends on the input, so the layer is exactly one FIR
+kernel of the full window length — the inspector computes and draws that kernel and its frequency
+response from the state modes.
+
+*Mamba* keeps a real diagonal `A` but produces Δ, B and C from the input at every step, so the
+model is no longer time-invariant and has no fixed kernel; the inspector shows Δ(t) instead. The
+block also carries the short causal depthwise convolution and the SiLU gate branch of the original,
+without which a real-diagonal state is only a running average and cannot resolve a frequency.
+
+All three feed a linear layer and softmax, and are trained with **Adam** and cross-entropy plus
+optional L2. Forward and backward passes are written from scratch in `js/nn.js`, `js/rnn.js` and
+`js/ssm.js` — convolution, pooling, three recurrent cells, both state space variants, dense layer
+and softmax, all over flat `Float32Array`s indexed as `[channel * length + t]`. Every gradient,
+including the complex chain rule through `Ā` and `B̄`, agrees with numeric finite differences to
+within 1% at the full sequence length.
+
+Sequence models need care that the convolutional one does not: Adam gets global gradient-norm
+clipping, and both SSM blocks need their nonlinearity — a state space recurrence is linear, so
+without it the whole stack collapses into a single linear map and never leaves chance level.
 
 ## Panels
 
@@ -94,6 +113,7 @@ binomial test. Includes pruning and fine-tuning attacks to see how much of it su
 | `js/fft.js` | radix-2 FFT, spectra and kernel frequency response |
 | `js/nn.js` | convolutional layers, forward/backprop, Adam, evaluation |
 | `js/rnn.js` | RNN / GRU / LSTM cells, BPTT, gradient clipping, readouts |
+| `js/ssm.js` | S4D and selective (Mamba) state space layers, kernel extraction |
 | `js/viz.js` | layout and canvas drawing |
 | `js/stream.js` | live generator, scope and decision ribbon |
 | `js/ood.js` | novelty scores, calibration, AUC, histograms |

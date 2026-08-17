@@ -177,12 +177,18 @@ function rnnLinkStrength(stage, unit, ci) {
 /** Uniform accessor so the diagram does not care which model it is drawing. */
 function stageLink(model, li, co, ci) {
   const st = model.stages[li];
-  return st.conv ? linkStrength(st.conv, co, ci) : rnnLinkStrength(st, co, ci);
+  if (st.conv) return linkStrength(st.conv, co, ci);
+  if (st.ssm) {
+    const w = st.layer.pin.W[co * st.layer.D + ci];
+    return { mag: Math.abs(w), sign: w >= 0 ? 1 : -1 };
+  }
+  return rnnLinkStrength(st, co, ci);
 }
 
 function stageInputCount(model, li) {
   const st = model.stages[li];
-  return st.conv ? st.conv.cin : st.layer.fwd.D;
+  if (st.conv) return st.conv.cin;
+  return st.ssm ? st.layer.D : st.layer.fwd.D;
 }
 
 function outLinkStrength(model, ci) {
@@ -263,7 +269,9 @@ function drawNetwork(ctx, o) {
     if (snap) for (let i = 0; i < snap.length; i++) scale = Math.max(scale, Math.abs(snap[i]));
     label(ctx, col.x, col.nodes[0].y - 8, st.conv
       ? 'LAYER ' + (li + 1) + ' · K=' + st.conv.k + (st.pooled ? ' · pool' : '')
-      : 'LAYER ' + (li + 1) + ' · ' + st.kind.toUpperCase() + (st.bidir ? ' · bi' : ''));
+      : st.ssm
+        ? 'LAYER ' + (li + 1) + ' · ' + (st.kind === 's4' ? 'S4D' : 'MAMBA') + ' · N=' + st.layer.N
+        : 'LAYER ' + (li + 1) + ' · ' + st.kind.toUpperCase() + (st.bidir ? ' · bi' : ''));
     for (let c = 0; c < col.nodes.length; c++) {
       const nd = col.nodes[c];
       const isHot = hover && hover.type === 'filter' && hover.layer === li && hover.ch === c;

@@ -8,7 +8,10 @@ const state = {
     { filters: 4, kernel: 5, pool: true },
   ],
   rnnLayers: [{ units: 8, bidir: false }],
+  ssmLayers: [{ units: 6 }],
   cell: 'gru',
+  ssmMode: 's4',
+  stateDim: 8,
   readout: 'mean',
   activation: 'relu',
   head: 'gap',
@@ -91,7 +94,8 @@ function probeInfo() {
 /* ------------------------------------------------------------- model */
 /** The layer list of whichever architecture is active. */
 function archLayers() {
-  return state.arch === 'cnn' ? state.layers : state.rnnLayers;
+  if (state.arch === 'cnn') return state.layers;
+  return state.arch === 'rnn' ? state.rnnLayers : state.ssmLayers;
 }
 
 function rebuildModel() {
@@ -103,10 +107,19 @@ function rebuildModel() {
       nClasses: activeClasses().length,
       inputLen: WIN,
     });
-  } else {
+  } else if (state.arch === 'rnn') {
     model = new RNNNet({
       cell: state.cell,
       layers: JSON.parse(JSON.stringify(state.rnnLayers)),
+      readout: state.readout,
+      nClasses: activeClasses().length,
+      inputLen: WIN,
+    });
+  } else {
+    model = new SSMNet({
+      mode: state.ssmMode,
+      layers: JSON.parse(JSON.stringify(state.ssmLayers)),
+      stateDim: state.stateDim,
       readout: state.readout,
       nClasses: activeClasses().length,
       inputLen: WIN,
@@ -133,7 +146,9 @@ function setArch(arch) {
   document.body.className = 'arch-' + arch;
   $('archCnn').classList.toggle('on', arch === 'cnn');
   $('archRnn').classList.toggle('on', arch === 'rnn');
-  $('layerLbl').textContent = arch === 'cnn' ? 'Convolutional layers' : 'Recurrent layers';
+  $('archSsm').classList.toggle('on', arch === 'ssm');
+  $('layerLbl').textContent = arch === 'cnn' ? 'Convolutional layers'
+    : arch === 'rnn' ? 'Recurrent layers' : 'State space layers';
   setStream(false);
   ood.cal = null; ood.stats = null;
   wm.last = null; wm.sweep = null;
@@ -376,6 +391,62 @@ function drawInspector(probs, oodInfo) {
   const title = (s, y) => { ctx.fillStyle = '#7b8794'; ctx.font = '600 10px system-ui,sans-serif'; ctx.fillText(s, 0, y); };
 
   const h0 = state.hover;
+  if (h0 && h0.type === 'filter' && model.kind === 'ssm') {
+    const st = model.stages[h0.layer];
+    const layer = st.layer;
+    if (st.kind === 's4') {
+      // time-invariant, so the layer has an exact equivalent FIR kernel
+      const k = layer.kernel(h0.ch, WIN);
+      title('EQUIVALENT CONVOLUTION KERNEL', 10);
+      let km = 1e-9;
+      for (let i = 0; i < k.length; i++) km = Math.max(km, Math.abs(k[i]));
+      drawWave(ctx, 0, 14, w, 52, k, 0, WIN, km);
+      title('ITS FREQUENCY RESPONSE |H(f)|', 82);
+      const m = magSpectrum(k, 0, WIN);
+      drawSpectrum(ctx, 0, 86, w, 44, m, maxOf(m));
+      ctx.fillStyle = '#98a2ad';
+      ctx.font = '9px system-ui,sans-serif';
+      ctx.fillText('0', 0, 140);
+      ctx.fillText('1600 Hz', w - 42, 140);
+      let peak = 0;
+      for (let i = 1; i < m.length; i++) if (m[i] > m[peak]) peak = i;
+      const dt = Math.exp(layer.pdt.W[h0.ch]);
+      txt.innerHTML = '<b>Layer ' + (h0.layer + 1) + ', channel ' + (h0.ch + 1) + '</b> · S4D · ' +
+        layer.N + ' modes · Δ = ' + n4(dt) +
+        '<br>Because the model is time-invariant, these ' + layer.N + ' state modes are exactly ' +
+        'equivalent to the FIR kernel above — a convolution of the full window length, learned ' +
+        'through a recurrence instead of stored tap by tap.' +
+        '<br>|H(f)| peaks near <b>' + Math.round(peak / m.length * (SR / 2)) + ' Hz</b>.';
+    } else {
+      title('Δ(t) — WHAT THE MODEL LETS IN', 10);
+      if (layer.dts) {
+        const dts = new Float64Array(WIN);
+        for (let t = 0; t < WIN; t++) dts[t] = layer.dts[h0.ch * WIN + t];
+        let mx = 1e-9;
+        for (let t = 0; t < WIN; t++) mx = Math.max(mx, dts[t]);
+        drawSpectrum(ctx, 0, 14, w, 52, dts, mx);
+      }
+      title('CHANNEL OUTPUT OVER THE WINDOW', 82);
+      if (st.snapshot) {
+        let sc = 1e-6;
+        for (let i = 0; i < st.snapshot.length; i++) sc = Math.max(sc, Math.abs(st.snapshot[i]));
+        drawWave(ctx, 0, 86, w, 48, st.snapshot, h0.ch * st.L, st.L, sc);
+      }
+      let mn = Infinity, mx2 = -Infinity;
+      if (layer.dts) {
+        for (let t = 0; t < WIN; t++) {
+          const v = layer.dts[h0.ch * WIN + t];
+          mn = Math.min(mn, v); mx2 = Math.max(mx2, v);
+        }
+      }
+      txt.innerHTML = '<b>Layer ' + (h0.layer + 1) + ', channel ' + (h0.ch + 1) + '</b> · Mamba · ' +
+        layer.N + ' modes<br>Δ(t) ranges ' + n4(mn) + ' … ' + n4(mx2) +
+        ' across this window. Where Δ is large the input is written into the state; where it ' +
+        'collapses the state coasts and the sample is ignored. That input dependence is the ' +
+        'whole point of a selective SSM — and the reason it has no fixed kernel.';
+    }
+    return;
+  }
   if (h0 && h0.type === 'filter' && model.kind === 'rnn') {
     const st = model.stages[h0.layer];
     const iw = model.unitInputWeights(h0.layer, h0.ch);
@@ -591,6 +662,7 @@ function renderMathInner(host) {
   }
   if (sel.type === 'filter') {
     if (model.kind === 'rnn') renderUnitMath(host, title, slider, sel);
+    else if (model.kind === 'ssm') renderSsmMath(host, title, slider, sel);
     else renderFilterMath(host, title, slider, sel);
   }
   else if (sel.type === 'input') renderInputMath(host, title, slider);
@@ -709,11 +781,116 @@ function renderUnitMath(host, title, slider, sel) {
   host.innerHTML = html;
 }
 
+/* ---------------------------------------------------- state space channel */
+function renderSsmMath(host, title, slider, sel) {
+  const li = sel.layer, ch = sel.ch;
+  const st = model.stages[li];
+  if (!st || ch >= st.C) { state.selected = null; return renderMathInner(host); }
+
+  slider.disabled = false;
+  slider.max = WIN - 1;
+  const t = Math.min(state.tPos, WIN - 1);
+  state.tPos = t;
+  slider.value = t;
+  $('tposVal').textContent = 't = ' + t + '  (' + (t / SR * 1000).toFixed(2) + ' ms)';
+
+  const d = model.stepDetail(li, ch, t);
+  const isS4 = d.mode === 's4';
+  title.textContent = 'Layer ' + (li + 1) + ' · channel ' + (ch + 1) + ' · step t = ' + t +
+    ' · ' + (isS4 ? 'S4D' : 'Mamba (selective)');
+
+  let html = '<h4>1 · The state space model</h4>';
+  html += '<div class="formula">x<sub>k</sub> = Ā ⊙ x<sub>k−1</sub> + B̄ u<sub>k</sub>' +
+    ' &nbsp;&nbsp; y<sub>k</sub> = ' + (isS4 ? '2·Re( Σ<sub>n</sub> C<sub>n</sub> x<sub>k,n</sub> )'
+      : 'Σ<sub>n</sub> C<sub>n</sub>(t) x<sub>k,n</sub>') + ' + D·u<sub>k</sub><br>' +
+    'Ā = exp(Δ·A)' + (isS4 ? ' , &nbsp; B̄ = (Ā − 1)/A &nbsp; (zero-order hold, B = 1)'
+      : '(t) , &nbsp; B̄ = Δ(t)·B(t)') + '</div>';
+  html += '<div class="formula" style="margin-top:6px">' + (isS4
+    ? '<span class="op">A is complex and diagonal, and nothing here depends on the input — the ' +
+      'layer is one fixed convolution. Hover the channel to see that kernel and its frequency response.</span>'
+    : '<span class="op">A is real, but Δ, B and C are produced from the input at every step. The ' +
+      'model is no longer time-invariant, so no single kernel exists — selectivity replaces it.</span>') +
+    '</div>';
+
+  /* --- discretisation / step-dependent quantities --- */
+  html += '<h4>2 · ' + (isS4 ? 'Discretisation of each mode' : 'What the input selects at this step') + '</h4>';
+  if (!isS4) {
+    html += '<div class="formula">Δ(t) = softplus( ' + n3(Math.log(d.dtBase)) + ' + ' +
+      n3(d.dtW) + '·u<sub>t</sub> ) = softplus( ' + n3(Math.log(d.dtBase) + d.dtW * d.u) +
+      ' ) = <span class="res">' + n4(d.dt) + '</span>' +
+      '  <span class="op">— large Δ writes the input into the state, Δ→0 ignores it</span></div>';
+  }
+  html += '<div class="scrollx" style="margin-top:8px"><table class="mtab"><thead><tr><th>mode n</th>' +
+    (isS4
+      ? '<th>A<sub>n</sub></th><th>Ā<sub>n</sub> = exp(ΔA)</th><th>|Ā|</th><th>freq [Hz]</th><th>B̄<sub>n</sub></th><th>C<sub>n</sub></th>'
+      : '<th>A<sub>n</sub></th><th>Ā<sub>n</sub>(t)</th><th>B(t)</th><th>C(t)</th>') +
+    '</tr></thead><tbody>';
+  for (const m of d.modes) {
+    if (isS4) {
+      const mag = Math.hypot(m.abarRe, m.abarIm);
+      const hz = Math.abs(Math.atan2(m.abarIm, m.abarRe)) / (2 * Math.PI) * SR;
+      html += '<tr><td class="ch">' + m.n + '</td>' +
+        '<td>' + n3(m.aRe) + (m.aIm >= 0 ? ' + ' : ' − ') + n3(Math.abs(m.aIm)) + 'i</td>' +
+        '<td>' + n3(m.abarRe) + (m.abarIm >= 0 ? ' + ' : ' − ') + n3(Math.abs(m.abarIm)) + 'i</td>' +
+        '<td>' + n4(mag) + '</td><td class="sum">' + Math.round(hz) + '</td>' +
+        '<td>' + n3(m.bbarRe) + (m.bbarIm >= 0 ? ' + ' : ' − ') + n3(Math.abs(m.bbarIm)) + 'i</td>' +
+        '<td>' + n3(m.cRe) + (m.cIm >= 0 ? ' + ' : ' − ') + n3(Math.abs(m.cIm)) + 'i</td></tr>';
+    } else {
+      html += '<tr><td class="ch">' + m.n + '</td><td>' + n3(m.aRe) + '</td>' +
+        '<td>' + n4(m.abarRe) + '</td><td>' + n3(m.B) + '</td><td>' + n3(m.C) + '</td></tr>';
+    }
+  }
+  html += '</tbody></table></div>';
+  if (isS4) {
+    html += '<div class="formula" style="margin-top:6px"><span class="op">|Ā| is how much of the ' +
+      'state survives one sample (memory ≈ 1/(1−|Ā|) samples); the frequency column is where that ' +
+      'mode resonates, from the angle of Ā. Δ = ' + n4(d.dt) + ' for this channel.</span></div>';
+  }
+
+  /* --- the update at this step --- */
+  html += '<h4>3 · The update at t = ' + t + '</h4>';
+  html += '<div class="scrollx"><table class="mtab"><thead><tr><th>mode</th>' +
+    '<th>Ā·x<sub>t−1</sub></th><th>B̄·u<sub>t</sub></th><th>x<sub>t</sub></th>' +
+    '<th>contribution to y</th></tr></thead><tbody>';
+  let ySum = 0;
+  for (const m of d.modes) {
+    if (isS4) {
+      const [ar, ai] = cmul(m.abarRe, m.abarIm, m.prevRe, m.prevIm);
+      const contrib = 2 * (m.cRe * m.xRe - m.cIm * m.xIm);
+      ySum += contrib;
+      html += '<tr><td class="ch">' + m.n + '</td>' +
+        '<td>' + n3(ar) + (ai >= 0 ? '+' : '−') + n3(Math.abs(ai)) + 'i</td>' +
+        '<td>' + n3(m.bbarRe * d.u) + (m.bbarIm * d.u >= 0 ? '+' : '−') + n3(Math.abs(m.bbarIm * d.u)) + 'i</td>' +
+        '<td>' + n3(m.xRe) + (m.xIm >= 0 ? '+' : '−') + n3(Math.abs(m.xIm)) + 'i</td>' +
+        '<td class="sum">' + n4(contrib) + '</td></tr>';
+    } else {
+      const contrib = m.C * m.xRe;
+      ySum += contrib;
+      html += '<tr><td class="ch">' + m.n + '</td><td>' + n4(m.abarRe * m.prevRe) + '</td>' +
+        '<td>' + n4(d.dt * m.B * d.u) + '</td><td>' + n4(m.xRe) + '</td>' +
+        '<td class="sum">' + n4(contrib) + '</td></tr>';
+    }
+  }
+  html += '</tbody></table></div>';
+  html += '<div class="formula" style="margin-top:8px">y<sub>t</sub> = ' + n4(ySum) +
+    ' <span class="op">(from the states)</span> + D·u<sub>t</sub> = ' + n3(d.Dskip) + '·' + n3(d.u) +
+    ' = <span class="res">' + n4(ySum + d.Dskip * d.u) + '</span></div>';
+  html += '<div class="formula" style="margin-top:6px">' + (isS4
+    ? 'then SiLU: out = y·σ(y) = <span class="res">' + n4(st.snapshot ? st.snapshot[ch * st.L + t] : 0) + '</span>'
+    : 'then the Mamba gate: out = y · SiLU(gate) = <span class="res">' +
+      n4(st.snapshot ? st.snapshot[ch * st.L + t] : 0) + '</span>') +
+    '  <span class="op">— the recurrence is linear, so without this the whole stack would collapse ' +
+    'into one linear map</span></div>';
+
+  html += rnnDownstreamHtml(li, ch, 4);
+  host.innerHTML = html;
+}
+
 /** Where a hidden unit's sequence goes: the next layer, or the readout and logits. */
-function rnnDownstreamHtml(li, unit) {
+function rnnDownstreamHtml(li, unit, num) {
   const st = model.stages[li];
   const last = li === model.stages.length - 1;
-  let html = '<h4>5 · Where this unit goes</h4>';
+  let html = '<h4>' + (num || 5) + ' · Where this unit goes</h4>';
 
   if (!last) {
     const nx = model.stages[li + 1];
@@ -722,7 +899,7 @@ function rnnDownstreamHtml(li, unit) {
     html += '<div class="scrollx"><table class="mtab"><thead><tr><th>unit in layer ' + (li + 2) +
       '</th><th>Σ|w| over gates</th></tr></thead><tbody>';
     for (let co = 0; co < nx.C; co++) {
-      const s = rnnLinkStrength(nx, co, unit);
+      const s = stageLink(model, li + 1, co, unit);
       html += '<tr><td class="ch">unit ' + (co + 1) + '</td><td class="sum">' + n3(s.mag) + '</td></tr>';
     }
     html += '</tbody></table></div>';
@@ -1075,6 +1252,18 @@ function receptiveField(layerIdx) {
 function buildLayerControls() {
   const host = $('layerControls');
   host.innerHTML = '';
+  if (state.arch === 'ssm') {
+    state.ssmLayers.forEach((ls) => {
+      const card = document.createElement('div');
+      card.className = 'laycard';
+      card.innerHTML = '<div class="row"><button data-a="m">−</button><b>' + ls.units +
+        '</b><button data-a="p">+</button></div><div class="row"><span style="font-size:10px;color:#7b8794">channels</span></div>';
+      card.querySelector('[data-a=m]').onclick = () => { if (ls.units > 1) { ls.units--; rebuildModel(); } };
+      card.querySelector('[data-a=p]').onclick = () => { if (ls.units < 10) { ls.units++; rebuildModel(); } };
+      host.appendChild(card);
+    });
+    return;
+  }
   if (state.arch === 'rnn') {
     state.rnnLayers.forEach((ls) => {
       const card = document.createElement('div');
@@ -1312,8 +1501,8 @@ function renderWmPanel() {
       '% of each batch are triggers. Changing the class set changes their labels — ' +
       'the watermark then has to be embedded again.</p>';
   }
-  if (state.arch === 'rnn') {
-    html += '<div class="verdict no" style="margin-top:8px">⚠ <b>A recurrent readout collapses the ' +
+  if (state.arch !== 'cnn') {
+    html += '<div class="verdict no" style="margin-top:8px">⚠ <b>A sequence readout collapses the ' +
       'sequence to ' + (model ? model.finalC : '—') + ' numbers</b>, so a linear head cannot memorise ' +
       wm.T + ' arbitrary label assignments. Watermark capacity here is far lower than with the ' +
       'convolutional Flatten head — expect the verification to stay near chance.</div>';
@@ -1365,7 +1554,8 @@ function bindUI() {
     const last = arr[arr.length - 1];
     arr.push(state.arch === 'cnn'
       ? { filters: last.filters, kernel: last.kernel, pool: true }
-      : { units: last.units, bidir: last.bidir });
+      : state.arch === 'rnn' ? { units: last.units, bidir: last.bidir }
+        : { units: last.units });
     rebuildModel(); evaluate(); renderMetrics();
   };
   $('layMinus').onclick = () => {
@@ -1377,6 +1567,13 @@ function bindUI() {
 
   $('archCnn').onclick = () => setArch('cnn');
   $('archRnn').onclick = () => setArch('rnn');
+  $('archSsm').onclick = () => setArch('ssm');
+  $('ssmMode').onchange = (e) => {
+    state.ssmMode = e.target.value; rebuildModel(); evaluate(); renderMetrics(); renderNet();
+  };
+  $('stateDim').onchange = (e) => {
+    state.stateDim = +e.target.value; rebuildModel(); evaluate(); renderMetrics(); renderNet();
+  };
   $('cell').onchange = (e) => {
     state.cell = e.target.value; rebuildModel(); evaluate(); renderMetrics(); renderNet();
   };

@@ -19,6 +19,7 @@
   <nav class="archsw" role="tablist">
     <button id="archCnn" class="on" role="tab">1D CNN Playground</button>
     <button id="archRnn" role="tab">RNN Playground</button>
+    <button id="archSsm" role="tab">S4 / Mamba Playground</button>
   </nav>
   <div class="epochbox">
     <span class="lbl">Epoch</span>
@@ -78,7 +79,20 @@
     </select>
   </label>
 
-  <label class="ctl rnnonly"><span>Readout</span>
+  <label class="ctl ssmonly"><span>State space model</span>
+    <select id="ssmMode">
+      <option value="s4" selected>S4D — diagonal, time-invariant</option>
+      <option value="mamba">Mamba — selective (S6)</option>
+    </select>
+  </label>
+
+  <label class="ctl ssmonly"><span>State dim N</span>
+    <select id="stateDim">
+      <option>4</option><option selected>8</option><option>16</option>
+    </select>
+  </label>
+
+  <label class="ctl seqonly"><span>Readout</span>
     <select id="readout">
       <option value="mean" selected>Mean over time</option>
       <option value="last">Last state</option>
@@ -306,6 +320,24 @@
 </section>
 
 <footer class="notes">
+  <h3 class="ssmonly">Things to try — S4 / Mamba</h3>
+  <ul class="ssmonly">
+    <li><b>S4D is a convolution in disguise.</b> Nothing in it depends on the input, so the whole
+      layer collapses to one FIR kernel of the full window length. Hover a channel: the inspector
+      shows that exact kernel and its frequency response, computed from the state modes.</li>
+    <li><b>Read the mode table.</b> Click a channel: each mode has |Ā| — how much of the state
+      survives one sample, so memory ≈ 1/(1−|Ā|) — and a resonant frequency taken from the angle of
+      Ā. That is how a handful of state variables cover the whole band.</li>
+    <li><b>Δ is the timescale.</b> One number per channel decides both memory length and where the
+      modes sit in frequency. Channels are initialised across decades so they cover different bands.</li>
+    <li><b>Switch to Mamba</b> and the kernel disappears from the inspector — replaced by Δ(t).
+      Making Δ, B and C depend on the input breaks time invariance, which is exactly what lets the
+      model ignore some samples and write others into the state.</li>
+    <li>Both blocks end in a nonlinearity — SiLU for S4, the gate branch for Mamba. Without it the
+      recurrence is linear and the entire stack collapses into a single linear map, which cannot
+      separate these classes at all.</li>
+  </ul>
+
   <h3 class="rnnonly">Things to try — RNN</h3>
   <ul class="rnnonly">
     <li><b>Start with GRU</b>, mean readout, 8 units. It is the fastest of the three to converge
@@ -346,6 +378,7 @@
 <script src="js/fft.js"></script>
 <script src="js/nn.js"></script>
 <script src="js/rnn.js"></script>
+<script src="js/ssm.js"></script>
 <script src="js/viz.js"></script>
 <script src="js/stream.js"></script>
 <script src="js/ood.js"></script>
