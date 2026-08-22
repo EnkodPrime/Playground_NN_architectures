@@ -24,6 +24,15 @@ Open `index.html` directly, or serve the folder:
 python -m http.server 8765
 ```
 
+## Training runs
+
+**Run for** next to the transport buttons sets how many epochs one press of ▶ trains for. Pick a
+preset from the list (50, 100, 200, 500, 1000) or type any number; leave it empty and ▶ runs until
+you press pause, as before. While a fixed run is going the epoch counter shows the epoch it is
+heading for, and training stops there on its own so two configurations can be compared over
+exactly the same number of epochs. Pausing keeps the target — ▶ resumes the same run rather than
+starting another one — and ⟳ clears it along with the weights.
+
 ## The task
 
 Each example is a window of **128 samples at 3200 Hz** (40 ms ≈ 2 cycles of 50 Hz).

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NN Architecture Playground — power-line disturbances</title>
-<link rel="stylesheet" href="css/style.css?v=7">
+<link rel="stylesheet" href="css/style.css?v=8">
 </head>
 <body>
 
@@ -24,7 +24,7 @@
   </nav>
   <div class="epochbox">
     <span class="lbl">Epoch</span>
-    <span id="epoch" class="val">000,000</span>
+    <span id="epoch" class="val">000,000</span><span id="epochTgt" class="tgt"></span>
   </div>
 </header>
 
@@ -32,6 +32,18 @@
   <button id="btnPlay" class="play" title="Run / pause">▶</button>
   <button id="btnStep" class="icon" title="One epoch">⏭</button>
   <button id="btnReset" class="icon" title="Reset the weights">⟳</button>
+
+  <label class="ctl"><span>Run for</span>
+    <span class="epochsfield">
+      <input type="text" id="runEpochs" list="epochPresets" inputmode="numeric" placeholder="∞"
+             title="How many epochs one press of ▶ runs. Leave it empty to train until you pause.">
+      <em>epochs</em>
+    </span>
+    <datalist id="epochPresets">
+      <option value="50"></option><option value="100"></option><option value="200"></option>
+      <option value="500"></option><option value="1000"></option>
+    </datalist>
+  </label>
 
   <label class="ctl"><span>Learning rate</span>
     <select id="lr">
@@ -455,17 +467,17 @@
   </ul>
 </footer>
 
-<script src="js/signal.js?v=7"></script>
-<script src="js/fft.js?v=7"></script>
-<script src="js/nn.js?v=7"></script>
-<script src="js/rnn.js?v=7"></script>
-<script src="js/ssm.js?v=7"></script>
-<script src="js/gnn.js?v=7"></script>
-<script src="js/viz.js?v=7"></script>
-<script src="js/stream.js?v=7"></script>
-<script src="js/ood.js?v=7"></script>
-<script src="js/watermark.js?v=7"></script>
-<script src="js/quant.js?v=7"></script>
-<script src="js/main.js?v=7"></script>
+<script src="js/signal.js?v=8"></script>
+<script src="js/fft.js?v=8"></script>
+<script src="js/nn.js?v=8"></script>
+<script src="js/rnn.js?v=8"></script>
+<script src="js/ssm.js?v=8"></script>
+<script src="js/gnn.js?v=8"></script>
+<script src="js/viz.js?v=8"></script>
+<script src="js/stream.js?v=8"></script>
+<script src="js/ood.js?v=8"></script>
+<script src="js/watermark.js?v=8"></script>
+<script src="js/quant.js?v=8"></script>
+<script src="js/main.js?v=8"></script>
 </body>
 </html>

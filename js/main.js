@@ -26,6 +26,8 @@ const state = {
   ntrain: 480,
   mode: 'time',
   running: false,
+  runEpochs: 0,        // how many epochs one press of play should run; 0 is "until I pause"
+  stopAt: null,        // the epoch the current run stops at, or null for an open-ended run
   epoch: 0,
   hover: null,
   selected: null,
@@ -152,6 +154,7 @@ function rebuildModel() {
   quant.fp = null; quant.frozen = false; quant.metrics = null; quant.sweep = null;
   const fz = $('qFreeze'); if (fz) fz.checked = false;
   state.epoch = 0;
+  if (state.stopAt !== null) armRun();
   hTrain = []; hTest = [];
   lastMetrics = null;
   $('paramCount').textContent = model.paramCount().toLocaleString('en-US') + ' parameters';
@@ -209,8 +212,37 @@ function trainOneBatch() {
 function trainSlice(budgetMs) {
   const t0 = performance.now();
   let steps = 0;
-  do { trainOneBatch(); steps++; } while (performance.now() - t0 < budgetMs);
+  do {
+    if (runFinished()) break;
+    trainOneBatch(); steps++;
+  } while (performance.now() - t0 < budgetMs);
   return steps;
+}
+
+/* --------------------------------------------------- run for N epochs */
+
+/** True once a run with a fixed length has trained for all of its epochs. */
+function runFinished() {
+  return state.stopAt !== null && state.epoch >= state.stopAt;
+}
+
+/** Starts or stops the training loop and keeps the play button in step. */
+function setRunning(on) {
+  state.running = on;
+  $('btnPlay').textContent = on ? '⏸' : '▶';
+  $('btnPlay').classList.toggle('on', on);
+}
+
+/** Arms a run: a fixed number of epochs from here, or open-ended when 0. */
+function armRun() {
+  state.stopAt = state.runEpochs > 0 ? state.epoch + state.runEpochs : null;
+  renderRunTarget();
+}
+
+/** Shows the epoch a fixed-length run is heading for, next to the counter. */
+function renderRunTarget() {
+  const el = $('epochTgt');
+  if (el) el.textContent = state.stopAt === null ? '' : '/ ' + Math.round(state.stopAt);
 }
 
 function evaluate() {
@@ -229,10 +261,17 @@ function loop() {
   if (stream.on) streamTick();
   if (state.running) {
     trainSlice(stream.on ? 6 : 11);
-    // A full evaluation is a forward pass over 600 windows — far more expensive
-    // than a training batch. Three times a second is plenty for the curves and
-    // leaves the core to the actual training.
-    if (frameNo % 20 === 0) { evaluate(); renderMetrics(); }
+    if (runFinished()) {
+      // the requested epochs are done — pause and leave the final numbers up
+      setRunning(false);
+      state.stopAt = null;
+      evaluate(); renderMetrics(); renderRunTarget();
+    } else if (frameNo % 20 === 0) {
+      // A full evaluation is a forward pass over 600 windows — far more expensive
+      // than a training batch. Three times a second is plenty for the curves and
+      // leaves the core to the actual training.
+      evaluate(); renderMetrics();
+    }
   }
   if (frameNo % 2 === 0 || stream.on) renderNet();
   requestAnimationFrame(loop);
@@ -387,6 +426,7 @@ function renderMetrics() {
   $('lossTest').textContent = lastMetrics.test.loss.toFixed(3);
   $('accTest').textContent = (lastMetrics.test.acc * 100).toFixed(1) + '%';
   $('epoch').textContent = String(Math.floor(state.epoch)).padStart(6, '0');
+  renderRunTarget();
   $('rejRow').classList.toggle('hidden', !ood.on);
   if (ood.on) $('rejVal').textContent = (lastMetrics.test.rejected * 100).toFixed(1) + '%';
 
@@ -1716,9 +1756,22 @@ function renderWmPanel() {
 /* ---------------------------------------------------------------- UI */
 function bindUI() {
   $('btnPlay').onclick = () => {
-    state.running = !state.running;
-    $('btnPlay').textContent = state.running ? '⏸' : '▶';
-    $('btnPlay').classList.toggle('on', state.running);
+    if (state.running) { setRunning(false); return; }
+    // a paused run keeps its target, so play resumes it instead of adding another N
+    if (!state.stopAt || state.stopAt <= state.epoch) armRun();
+    setRunning(true);
+  };
+  /** The run length as the field reads right now; anything unusable means "∞". */
+  const readRunEpochs = () => Math.max(0, Math.floor(parseFloat($('runEpochs').value) || 0));
+  state.runEpochs = readRunEpochs();   // the browser may restore a value across a reload
+  $('runEpochs').oninput = () => {
+    state.runEpochs = readRunEpochs();
+    // re-aim: a running or a paused run follows the number that is on screen now
+    if (state.running || state.stopAt !== null) armRun(); else renderRunTarget();
+  };
+  $('runEpochs').onchange = () => {
+    // tidy up whatever was typed once the field is left: a plain number, or empty for ∞
+    $('runEpochs').value = state.runEpochs > 0 ? String(state.runEpochs) : '';
   };
   $('btnStep').onclick = () => {
     const target = state.epoch + 1;
@@ -1727,9 +1780,8 @@ function bindUI() {
     evaluate(); renderMetrics(); renderNet();
   };
   $('btnReset').onclick = () => {
-    state.running = false;
-    $('btnPlay').textContent = '▶';
-    $('btnPlay').classList.remove('on');
+    setRunning(false);
+    state.stopAt = null; renderRunTarget();
     rebuildModel(); evaluate(); renderMetrics(); renderNet();
   };
 
