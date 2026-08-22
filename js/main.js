@@ -1968,7 +1968,7 @@ function bindUI() {
   // --- watermark
   $('wmOn').onchange = (e) => { wm.on = e.target.checked; renderWmPanel(); };
   $('wmKey').onchange = (e) => {
-    wm.key = e.target.value || 'playground-key';
+    wm.key = e.target.value || '1234567890';
     wm.triggers = null; wm.last = null; wm.sweep = null;
     renderWmPanel();
   };

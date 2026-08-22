@@ -8,7 +8,7 @@
 
 const wm = {
   on: false,            // embed during training
-  key: 'playground-key',
+  key: '1234567890',
   T: 40,                // number of triggers
   rate: 0.10,           // share of triggers per batch (10% gives 40/40 at no accuracy cost)
   triggers: null,
