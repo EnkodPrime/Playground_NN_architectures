@@ -199,8 +199,8 @@ button.strplay.on{background:#c0392b}
 .strstatus b{font-family:ui-monospace,Consolas,monospace}
 .strstatus .ok{color:#2e9e5b;font-weight:600}
 .strstatus .bad{color:#e0342b;font-weight:600}
-#scope{height:120px;margin-top:8px;border:1px solid var(--line)}
-#ribbon{height:74px;margin-top:6px;border:1px solid var(--line)}
+#scope{height:120px;margin-top:8px;border:1px solid var(--line);box-sizing:content-box;width:calc(100% - 2px)}
+#ribbon{height:74px;margin-top:6px;border:1px solid var(--line);box-sizing:content-box;width:calc(100% - 2px)}
 
 /* ------------------------------------------------------------ unknown */
 .oodpanel{
