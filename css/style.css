@@ -289,6 +289,15 @@ button.strplay.on{background:#c0392b}
 }
 .res.warn{background:#fdf2ec;border-color:#f2d5c2;color:#b0561d}
 .scrollx{overflow:auto;max-height:330px;border:1px solid var(--line);border-radius:7px}
+/* data-flow diagram above the tables: where every number comes from */
+.flow{
+  background:#edf3fc;border:1px solid #d6e2f3;border-radius:10px;padding:10px 12px 8px;
+  margin-bottom:4px;
+}
+.flow svg{display:block;width:100%;height:auto;margin:0 auto}
+.flow .blk{cursor:help}
+.flow .blk:hover rect,.flow .blk:hover circle,.flow .blk:hover ellipse{stroke:var(--red);stroke-width:2}
+.flowcap{font-size:11px;color:var(--muted);text-align:center;margin-top:4px}
 table.mtab{border-collapse:collapse;font-family:ui-monospace,Consolas,monospace;font-size:10.5px}
 table.mtab th{
   position:sticky;top:0;background:#f3f6f9;color:var(--muted);font-weight:600;

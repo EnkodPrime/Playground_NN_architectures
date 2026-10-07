@@ -787,7 +787,7 @@ function renderUnitMath(host, title, slider, sel) {
     ' · ' + d.kind.toUpperCase() + dirTxt;
 
   const gates = GATE_NAMES[d.kind];
-  let html = '';
+  let html = '<h4>How the numbers flow</h4>' + Flow[d.kind](d);
 
   /* --- 1. the recurrence --- */
   const formulas = {
@@ -892,7 +892,13 @@ function renderGnnMath(host, title, slider, sel) {
   const fnames = li === 0 ? ['x', 'Δx', '|x|'] : null;
   const fname = (i) => fnames ? fnames[i] : 'h' + i;
 
-  let html = '<h4>1 · The graph</h4>';
+  let fSelf = 0, fNeigh = 0;
+  for (let i = 0; i < d.D; i++) { fSelf += d.ws[i] * d.self[i]; fNeigh += d.wn[i] * d.agg[i]; }
+  let html = '<h4>How the numbers flow</h4>' + Flow.gnn(d, {
+    li, ch, fname, sSelf: fSelf, sNeigh: fNeigh,
+    src: li === 0 ? model.feat : model.stages[li - 1].snapshot, L: WIN,
+  });
+  html += '<h4>1 · The graph</h4>';
   html += '<div class="formula">Two samples i &lt; j are neighbours when every sample between ' +
     'them is lower than both — a horizontal visibility graph. Nothing is learned here; the ' +
     'topology is a function of the waveform.</div>';
@@ -968,7 +974,15 @@ function renderSsmMath(host, title, slider, sel) {
   title.textContent = 'Layer ' + (li + 1) + ' · channel ' + (ch + 1) + ' · step t = ' + t +
     ' · ' + (isS4 ? 'S4D' : 'Mamba (selective)');
 
-  let html = '<h4>1 · The state space model</h4>';
+  let fy = 0;
+  for (const m of d.modes) fy += isS4 ? 2 * (m.cRe * m.xRe - m.cIm * m.xIm) : m.C * m.xRe;
+  const lay = st.layer, at = ch * lay.L + t;
+  let html = '<h4>How the numbers flow</h4>' + Flow.ssm(d, {
+    ch, ySum: fy, y: fy + d.Dskip * d.u,
+    out: st.snapshot ? st.snapshot[ch * st.L + t] : 0,
+    gate: lay.g ? lay.g[at] : null,
+  });
+  html += '<h4>1 · The state space model</h4>';
   html += '<div class="formula">x<sub>k</sub> = Ā ⊙ x<sub>k−1</sub> + B̄ u<sub>k</sub>' +
     ' &nbsp;&nbsp; y<sub>k</sub> = ' + (isS4 ? '2·Re( Σ<sub>n</sub> C<sub>n</sub> x<sub>k,n</sub> )'
       : 'Σ<sub>n</sub> C<sub>n</sub>(t) x<sub>k,n</sub>') + ' + D·u<sub>k</sub><br>' +
@@ -1133,7 +1147,16 @@ function renderFilterMath(host, title, slider, sel) {
 
   const c = convAt(li, ch, t);
   const a = applyAct(c.z);
-  let html = '';
+  let pool = null;
+  if (st.pooled) {
+    const even = t - (t % 2);
+    const v0 = filterValueAt(li, ch, even);
+    const v1 = even + 1 < Lin ? filterValueAt(li, ch, even + 1) : -Infinity;
+    pool = { even, v0, v1, out: Math.max(v0, v1), tp: even >> 1 };
+  }
+  let html = '<h4>How the numbers flow</h4>' + Flow.conv(c, {
+    t, li, ch, a, pool, act: state.activation, actName: ACT_NAMES[state.activation], actExpr: actExpr(c.z),
+  });
 
   /* --- 1. convolution --- */
   html += '<h4>1 · Convolution (Conv1D, kernel K=' + c.K + ', "same" padding)</h4>';
@@ -1353,7 +1376,18 @@ function renderOutputMath(host, title, slider) {
   const ex = [];
   for (let i = 0; i < z.length; i++) { const e = Math.exp(z[i] - mx); ex.push(e); sumExp += e; }
 
-  let html = '<h4>1 · Linear layer</h4>';
+  const hk = model.headKind;
+  const last = model.stages[model.stages.length - 1];
+  const HEAD_LABELS = { gap: 'GAP', gmp: 'GMP', flat: 'Flatten', mean: 'mean over t', max: 'max over t', last: 'last step' };
+  const flat = hk === 'flat';
+  let html = '<h4>How the numbers flow</h4>' + Flow.output({
+    C: last.C, L: last.L, head: hk, headLabel: HEAD_LABELS[hk] || hk,
+    headTip: headName() + (flat ? ' — keeps all ' + last.C * last.L + ' numbers, position included'
+      : ' — one number per map'),
+    emb: !flat && model.embedding ? Array.from(model.embedding) : null,
+    z: Array.from(z), p: Array.from(p), cls, trueIdx: probeInfo().trained ? state.probeLabel : -1,
+  });
+  html += '<h4>1 · Linear layer</h4>';
   html += '<div class="formula">logit<sub>j</sub> = <span class="op">Σ</span><sub>c=0..' +
     (d.nin - 1) + '</sub> W[j][c] · h[c] + b[j]' +
     '   <span class="op">(h is the output of ' + headName() +
