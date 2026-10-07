@@ -110,16 +110,19 @@ each branch answers the current example — after training on all eight classes 
 the most active for harmonics. It is the slowest of the networks to get going: the loss can sit at
 equal odds for several epochs, and about one run in five needs a reset.
 
-**Transformer.** The window is cut into 16 patches of 8 samples (2.5 ms; one 50 Hz cycle is 8 patches);
-the same linear map turns each into a token of d ∈ {4, 8, 12} numbers and a learned position vector is
-added. 1–3 pre-LN encoder layers follow — x + Attention(LN(x)), then x + FFN(LN(x)) — with 1, 2 or 4
-heads and an FFN twice as wide, then a final layer norm, the mean over the tokens and a linear layer.
-With *causal* on, a token attends only to itself and the past: the decoder form a Transformer uses on a
-stream. The attention map of every encoder layer is drawn above its column (row: the token that looks,
-column: the token it looks at), and each head on its own in the hover view; clicking follows one token
-through the layer. On an impulse, layer 1 puts three to four times an even share of every token's
-attention on the patch with the impulse. With no built-in notion of neighbouring samples it is the most
-data-hungry network here: after 40 epochs on four classes 26–66% against 85–92% for the 2×4 CNN.
+**Transformer.** The window is cut into 16 patches of 8 samples (2.5 ms; one 50 Hz cycle is 8 patches),
+each a token of d ∈ {4, 8, 12} numbers plus a learned position vector. Two tokenizers: by default the
+convolutional one of the Compact Convolutional Transformer (Hassani et al. 2021) — d filters of length 7,
+ReLU, and the largest response of each in every patch — or, for comparison, the linear patch embedding of
+ViT, which maps the 8 raw samples straight to d numbers. 1–3 pre-LN encoder layers follow — x +
+Attention(LN(x)), then x + FFN(LN(x)) — with 1, 2 or 4 heads (never fewer than two numbers per head) and
+an FFN twice as wide, then a final layer norm, the mean over the tokens and a linear layer. With *causal*
+on, a token attends only to itself and the past: the decoder form a Transformer uses on a stream. The
+attention map of every encoder layer is drawn above its column (mean over the heads; each head in the
+hover view), and clicking follows one token through the layer. The tokenizer decides how well it learns
+from 480 windows: on four classes after 30 epochs 68–79% with conv tokens, 55–63% with linear patches
+(58–70% for the 2×4 CNN); on all eight classes 59% against 38% for the CNN. With linear patches the
+attention of layer 1 picks out the patch with an impulse; with conv tokens it does not need to.
 
 **KAN.** 1–3 Kolmogorov–Arnold layers of 1–10 nodes, then a linear layer to the classes. Every
 edge carries φ(x) = w_b·silu(x) + Σ c_m·B_m(x), with cubic B-splines on 5 grid intervals over

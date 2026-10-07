@@ -1,8 +1,16 @@
 /* transformer.js — a small Transformer encoder over the window, from scratch.
  *
  * The 128 samples are cut into 16 patches of 8 (2.5 ms each; one 50 Hz cycle
- * is 8 patches). Every patch becomes a token: the same linear map turns its 8
- * samples into a vector of d numbers, and a learned position vector is added.
+ * is 8 patches) and every patch becomes a token of d numbers, plus a learned
+ * position vector. Two tokenizers:
+ *
+ *   conv    d filters of length 7 slide over the samples, ReLU, and each patch
+ *           keeps the largest response of every filter — the convolutional
+ *           tokenizer of the Compact Convolutional Transformer (Hassani et al.
+ *           2021). The default: on 480 windows it is what lets attention learn.
+ *   linear  the same linear map turns the 8 raw samples of a patch into d numbers
+ *           (ViT). Left in for comparison: it has to learn from far fewer cues.
+ *
  * Each encoder layer then lets every token look at every other one:
  *
  *     x ← x + Attention(LN(x))        A = softmax(Q·Kᵀ / √d_h),  out = A·V·W_o
@@ -16,6 +24,7 @@
  */
 
 const TF_PATCH = 8;                          // samples per token
+const TF_KERNEL = 7;                         // filter length of the convolutional tokenizer
 
 /** The same linear map applied to every token. Tokens are stored token-major: X[t·d + i]. */
 class TokenLinear {
@@ -251,7 +260,15 @@ class TransformerNet {
     const cfg = this.cfg, d = cfg.d;
     const T = Math.floor(cfg.inputLen / TF_PATCH);
     this.T = T; this.d = d;
-    this.embed = new TokenLinear(TF_PATCH, d);
+    this.tokenizer = cfg.tokenizer === 'linear' ? 'linear' : 'conv';
+    if (this.tokenizer === 'conv') {
+      this.tconv = new Conv1D(1, d, TF_KERNEL, 1, false);
+      this.tact = new Activation('relu');
+      this.tpool = new MaxPool1D(TF_PATCH);
+      this.embed = null;
+    } else {
+      this.embed = new TokenLinear(TF_PATCH, d);
+    }
     this.pos = makeParam(T, d, 0.1, 0);              // a learned vector per position
     this.layers = cfg.layers.map(() => new EncoderLayer(d, cfg.heads, cfg.causal));
     this.lnF = new TokenLayerNorm(d);
@@ -260,7 +277,7 @@ class TransformerNet {
     this.layers.forEach((layer, i) => this.stages.push({
       index: i + 1, tflayer: true, layer, C: d, L: T, pooled: false, snapshot: null, causal: !!cfg.causal,
     }));
-    this.params = [this.embed, this.pos, ...this.layers.flatMap((l) => l.params), this.lnF, this.dense];
+    this.params = [this.tconv || this.embed, this.pos, ...this.layers.flatMap((l) => l.params), this.lnF, this.dense];
     this.finalC = d; this.finalL = T; this.headKind = 'mean';
     this.clip = 1.0;
   }
@@ -273,9 +290,18 @@ class TransformerNet {
   }
 
   forward(x, keepActs) {
-    const { T, d } = this;
-    // a window of 128 samples already is 16 patches of 8 in a row
-    const E = this.embed.forward(x, T);
+    const { T, d } = this, L = this.cfg.inputLen;
+    let E;
+    if (this.tokenizer === 'conv') {
+      const z = this.tconv.forward(x, L);
+      const a = this.tact.forward(z, L);
+      const p = this.tpool.forward(a, L);              // d × T, the largest response in every patch
+      E = new Float32Array(T * d);
+      for (let t = 0; t < T; t++) for (let i = 0; i < d; i++) E[t * d + i] = p[i * T + t];
+      if (keepActs) { this.convZ = z; this.convA = a; }
+    } else {
+      E = this.embed.forward(x, T);                     // 128 samples already are 16 patches of 8 in a row
+    }
     const X0 = new Float32Array(T * d);
     for (let i = 0; i < X0.length; i++) X0[i] = E[i] + this.pos.W[i];
     if (keepActs) { this.input = x; this.E = E; this.X0 = X0; this.stages[0].snapshot = this.toMaps(X0); }
@@ -303,7 +329,13 @@ class TransformerNet {
     let dX = this.lnF.backward(dN);
     for (let l = this.layers.length - 1; l >= 0; l--) dX = this.layers[l].backward(dX);
     for (let i = 0; i < dX.length; i++) this.pos.gW[i] += dX[i];
-    this.embed.backward(dX);
+    if (this.tokenizer === 'conv') {
+      const dp2 = new Float32Array(d * T);
+      for (let t = 0; t < T; t++) for (let i = 0; i < d; i++) dp2[i * T + t] = dX[t * d + i];
+      this.tconv.backward(this.tact.backward(this.tpool.backward(dp2)));
+    } else {
+      this.embed.backward(dX);
+    }
     return -Math.log(Math.max(1e-9, probs[target]));
   }
 

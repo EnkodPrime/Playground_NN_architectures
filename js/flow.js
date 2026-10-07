@@ -841,6 +841,43 @@ const Flow = (() => {
     return svg(x + 170, 150, s, 'Patch embedding of token ' + o.t + ', dimension ' + (o.ch + 1) + '.');
   }
 
+  /**
+   * The convolutional tokenizer: the filter's response at each of the 8 samples of
+   * the patch, ReLU, and the largest one is kept.
+   * @param d { as[8] (after ReLU), zs[8] (before), win, start, max, pos, out, k }
+   * @param o { t, ch }
+   */
+  function tfConvEmbed(d, o) {
+    let s = '';
+    const cw = 56, x0 = 40, y = 92;
+    d.as.forEach((a, j) => {
+      const cx = x0 + j * (cw + 4), hot = j === d.win;
+      s += txt(cx + cw / 2, y - 26, 's=' + (d.start + j), { size: 10, color: MUTED, mono: true });
+      s += '<g class="blk">' + tip('sample ' + (d.start + j) + ': filter ' + (o.ch + 1) + ' gives ' + num(d.zs[j], 4) +
+        ', after ReLU ' + num(a, 4) + (hot ? '\n← the largest in this patch' : '')) +
+        '<rect x="' + cx + '" y="' + (y - 18) + '" width="' + cw + '" height="36" rx="4" fill="' + (hot ? '#e8f0fc' : '#fff') +
+        '" stroke="' + (hot ? BLUE : '#c9d6e6') + '"' + (hot ? ' stroke-width="1.6"' : '') + '/>' +
+        txt(cx + cw / 2, y - 4, num(d.zs[j], 2), { size: 10, mono: true, color: '#9aa5b1' }) +
+        txt(cx + cw / 2, y + 11, num(a, 2), { size: 10.5, mono: true, color: signColor(a), weight: 600 }) + '</g>';
+    });
+    s += txt(x0, 36, 'filter ' + (o.ch + 1) + ' (K=' + d.k + ') at each sample of patch ' + o.t + ' — grey: conv + bias, coloured: after ReLU',
+      { size: 11, color: MUTED, anchor: 'start' });
+    const gridR = x0 + 8 * (cw + 4);
+    let x = gridR + 46;
+    s += wire([[gridR, y], [x - 26, y]]);
+    s += gate(x, y, 'max', d.max, { w: 52, tip: 'the patch keeps its largest response: ' + num(d.max, 4) + ' at sample ' + (d.start + d.win) });
+    s += wire([[x + 27, y], [x + 70, y]]);
+    x += 84;
+    s += wbox(x, y - 56, 'pos[' + o.t + ']', { w: 60, tip: 'the learned position vector of token ' + o.t + ', dimension ' + (o.ch + 1) + ' = ' + num(d.pos, 4) +
+      '\nThe max forgets where in the patch the response was; the position says which patch it is.' });
+    s += wire([[x, y - 42], [x, y - 14]]);
+    s += op(x, y, '+', { tip: 'token value = ' + num(d.max, 4) + ' + ' + num(d.pos, 4) + ' = ' + num(d.out, 4) });
+    s += wire([[x + 14, y], [x + 80, y]]);
+    s += pill(x + 47, y - 22, '', d.out, { tip: 'dimension ' + (o.ch + 1) + ' of token ' + o.t });
+    s += txt(x + 86, y + 5, 'token[' + o.t + ']', { size: 13, weight: 600, anchor: 'start' });
+    return svg(x + 170, 150, s, 'Convolutional tokenizer: token ' + o.t + ', dimension ' + (o.ch + 1) + '.');
+  }
+
   /** How much token t attends to each of the T tokens, as bars. */
   function attnBars(x, y, w, h, a, scores, t, causal, head) {
     const T = a.length, bw = w / T;
@@ -1115,5 +1152,5 @@ const Flow = (() => {
       (o.trueIdx >= 0 ? ' The true class is in bold.' : ''));
   }
 
-  return { lstm, gru, rnn, conv, ssm, gnn, output, dense, kan, resblock, inception, tfEmbed, attention };
+  return { lstm, gru, rnn, conv, ssm, gnn, output, dense, kan, resblock, inception, tfEmbed, tfConvEmbed, attention };
 })();

@@ -206,7 +206,8 @@ function stageLink(model, li, co, ci) {
   const st = model.stages[li];
   if (st.conv) return linkStrength(st.conv, co, ci);
   if (st.tfembed) {
-    // the patch embedding: the same 8 weights for every token
+    // the tokenizer: one filter (conv) or one row of weights (linear) per dimension
+    if (model.tconv) return linkStrength(model.tconv, co, 0);
     const E = model.embed;
     let sum = 0, signed = 0;
     for (let j = 0; j < E.din; j++) { const w = E.W[co * E.din + j]; sum += Math.abs(w); signed += w; }
@@ -371,7 +372,7 @@ function drawNetwork(ctx, o) {
         ? 'L' + (li + 1) + ' K' + st.conv.k + (st.res ? ' res' : '') + (st.pooled ? ' ↓' : '')
         : 'LAYER ' + (li + 1) + ' · K=' + st.conv.k + (st.res ? ' · res' : '') + (st.pooled ? ' · pool' : ''))
       : st.tfembed
-        ? 'EMBED · ' + model.T + ' tokens × ' + model.d
+        ? (narrow ? 'TOKENS' : model.tconv ? 'TOKENS · conv K=' + model.tconv.k + ' · max/8' : 'EMBED · ' + model.T + ' tokens × ' + model.d)
       : st.tflayer
         ? (narrow ? 'E' + li : 'ENCODER ' + li + ' · ' + st.layer.attn.H + ' head' + (st.layer.attn.H > 1 ? 's' : '') +
           (st.causal ? ' · causal' : ''))
@@ -574,8 +575,9 @@ function drawSelectionOverlay(ctx, o) {
     return;
   }
   if (st.tfembed) {
-    // a token is one patch of 8 samples
-    span(cols[0].nodes[0], 5, WIN, tPos * TF_PATCH, tPos * TF_PATCH + TF_PATCH - 1, 'rgba(29,78,216,0.30)');
+    // a token is one patch of 8 samples — plus the reach of the filter, with the conv tokenizer
+    const lo = model.tconv ? model.tconv.tapOffset(0) : 0, hi = model.tconv ? model.tconv.tapOffset(model.tconv.k - 1) : 0;
+    span(cols[0].nodes[0], 5, WIN, tPos * TF_PATCH + lo, tPos * TF_PATCH + TF_PATCH - 1 + hi, 'rgba(29,78,216,0.30)');
     span(cols[1].nodes[sel.ch], 4, st.L, tPos, tPos, 'rgba(29,78,216,0.55)');
     return;
   }

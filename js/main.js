@@ -18,6 +18,7 @@ const state = {
   tfD: 8,                      // Transformer width: numbers per token
   tfHeads: 2,
   tfCausal: false,
+  tfTok: 'conv',               // Transformer tokenizer: 'conv' (CCT) or 'linear' (ViT patches)
   skip: true,                  // shortcuts in ResNet-1D and InceptionTime
   bn: true,                    // layer norm in ResNet-1D and InceptionTime
   residual: false,             // ResNet skips in the convolutional playground
@@ -167,7 +168,7 @@ function rebuildModel() {
   } else if (state.arch === 'transformer') {
     model = new TransformerNet({
       layers: JSON.parse(JSON.stringify(state.tfLayers)),
-      d: state.tfD, heads: state.tfHeads, causal: state.tfCausal,
+      d: state.tfD, heads: state.tfHeads, causal: state.tfCausal, tokenizer: state.tfTok,
       nClasses: activeClasses().length,
       inputLen: WIN,
     });
@@ -604,6 +605,24 @@ function drawInspector(probs, oodInfo) {
   }
   if (h0 && h0.type === 'filter' && model.kind === 'transformer') {
     const st = model.stages[h0.layer], T = model.T;
+    if (st.tfembed && model.tconv) {
+      const cv = model.tconv;
+      title('TOKENIZER FILTER ' + (h0.ch + 1) + ' (K=' + cv.k + ')', 10);
+      drawKernel(ctx, 0, 14, w, 34, cv.W, h0.ch * cv.k, cv.k);
+      title('ITS FREQUENCY RESPONSE |H(f)|', 62);
+      const resp = kernelResponse(cv.W, h0.ch * cv.k, cv.k, 128);
+      drawSpectrum(ctx, 0, 66, w, 34, resp, maxOf(resp));
+      ctx.fillStyle = '#98a2ad'; ctx.font = '9px system-ui,sans-serif';
+      ctx.fillText('0', 0, 110); ctx.fillText('1600 Hz', w - 42, 110);
+      title('THIS DIMENSION ACROSS THE TOKENS, FOR THIS EXAMPLE', 124);
+      if (st.snapshot) drawWave(ctx, 0, 128, w, 36, st.snapshot, h0.ch * T, T, maxAbs(st.snapshot, 0, st.snapshot.length));
+      let peak = 0;
+      for (let i = 1; i < resp.length; i++) if (resp[i] > resp[peak]) peak = i;
+      txt.innerHTML = '<b>Tokenizer, dimension ' + (h0.ch + 1) + '</b> · a filter of ' + cv.k + ' samples, ReLU, the largest ' +
+        'response in each patch of ' + TF_PATCH + '<br>|H(f)| peaks near <b>' + Math.round(peak / resp.length * SR / 2) + ' Hz</b> — ' +
+        'this dimension of every token says how strongly that band showed up in its 2.5 ms.';
+      return;
+    }
     if (st.tfembed) {
       title('PATCH EMBEDDING — THE ' + TF_PATCH + ' WEIGHTS OF DIMENSION ' + (h0.ch + 1), 10);
       drawKernel(ctx, 0, 14, w, 40, model.embed.W, h0.ch * TF_PATCH, TF_PATCH);
@@ -1487,6 +1506,7 @@ function renderTfMath(host, title, slider, sel) {
 }
 
 function renderTfEmbedMath(host, title, st, ch, t) {
+  if (model.tconv) return renderTfConvEmbedMath(host, title, st, ch, t);
   const T = model.T, d = model.d, E = model.embed, x = model.input, start = t * TF_PATCH;
   title.textContent = 'Embedding · dimension ' + (ch + 1) + ' · token ' + t;
   const xs = [], ws = [];
@@ -1513,6 +1533,43 @@ function renderTfEmbedMath(host, title, st, ch, t) {
     '  =  <span class="res">' + n4(out) + '</span>  <span class="op">check: the box holds ' + n4(st.snapshot[ch * T + t]) +
     (Math.abs(st.snapshot[ch * T + t] - out) < 1e-4 ? ' ✓ matches' : ' ⚠ mismatch') + '</span></div>';
   html += tfDownstreamHtml(0, ch, 2);
+  host.innerHTML = html;
+}
+
+/** The convolutional tokenizer: filter, ReLU, the largest response of the patch, + position. */
+function renderTfConvEmbedMath(host, title, st, ch, t) {
+  const T = model.T, d = model.d, cv = model.tconv, L = WIN, x = model.input, start = t * TF_PATCH;
+  title.textContent = 'Tokens · dimension ' + (ch + 1) + ' · token ' + t;
+  const zs = [], as = [];
+  let win = 0;
+  for (let j = 0; j < TF_PATCH; j++) {
+    zs.push(model.convZ[ch * L + start + j]);
+    as.push(model.convA[ch * L + start + j]);
+    if (as[j] > as[win]) win = j;
+  }
+  const max = as[win], pos = model.pos.W[t * d + ch], out = max + pos;
+  setFlow(Flow.tfConvEmbed({ zs, as, win, start, max, pos, out, k: cv.k }, { t, ch }));
+
+  let html = '<h4>1 · Convolutional tokenizer</h4>';
+  html += '<div class="formula">token[' + t + '][' + (ch + 1) + '] = max<sub>s ∈ patch ' + t + '</sub> ReLU( Σ<sub>j</sub> W[' + (ch + 1) +
+    '][j] · x[s + j − ' + (-cv.tapOffset(0)) + '] + b ) + pos[' + t + '][' + (ch + 1) + ']</div>';
+  html += '<div class="formula" style="margin-top:6px"><span class="op">As in the Compact Convolutional Transformer: ' + d +
+    ' filters of length ' + cv.k + ' slide over the samples, and every patch of ' + TF_PATCH + ' keeps the largest response of ' +
+    'each. A token then says how strongly each filter fired in its 2.5 ms — energy at a frequency, a sharp edge — instead of ' +
+    'eight raw voltages. Switch Tokens to "linear patch" to compare.</span></div>';
+  html += '<div class="scrollx" style="margin-top:8px"><table class="mtab"><thead><tr><th>sample s</th><th>conv + bias</th>' +
+    '<th>ReLU</th></tr></thead><tbody>';
+  zs.forEach((z, j) => {
+    html += '<tr' + (j === win ? ' style="background:#eef4fd"' : '') + '><td class="ch">' + (start + j) + (j === win ? ' ← max' : '') +
+      '</td><td>' + n4(z) + '</td><td class="sum">' + n4(as[j]) + '</td></tr>';
+  });
+  html += '</tbody></table></div>';
+  html += '<h4>2 · The winning sample s = ' + (start + win) + ' in detail</h4>';
+  html += termsTableHtml(convTermsOf(cv, x, L, ch, start + win), () => 'signal');
+  html += '<div class="formula" style="margin-top:8px">max ' + n4(max) + '  +  pos ' + n4(pos) + '  =  <span class="res">' + n4(out) +
+    '</span>  <span class="op">check: the box holds ' + n4(st.snapshot[ch * T + t]) +
+    (Math.abs(st.snapshot[ch * T + t] - out) < 1e-4 ? ' ✓ matches' : ' ⚠ mismatch') + '</span></div>';
+  html += tfDownstreamHtml(0, ch, 3);
   host.innerHTML = html;
 }
 
@@ -2399,7 +2456,8 @@ function buildLayerControls() {
   host.innerHTML = '';
   if (state.arch === 'transformer') {
     // one card for the embedding, one per encoder layer — the columns they sit above
-    ['patch ' + TF_PATCH + ' → ' + state.tfD, ...state.tfLayers.map(() => 'attention + FFN')].forEach((s) => {
+    [state.tfTok === 'conv' ? 'conv K=' + TF_KERNEL + ' · max/' + TF_PATCH : 'patch ' + TF_PATCH + ' → ' + state.tfD,
+      ...state.tfLayers.map(() => 'attention + FFN')].forEach((s) => {
       const card = document.createElement('div');
       card.className = 'laycard';
       card.innerHTML = '<div class="row"><span style="font-size:10px;color:#7b8794">' + s + '</span></div>';
@@ -2838,16 +2896,27 @@ function bindUI() {
   $('skip').onchange = (e) => {
     state.skip = e.target.checked; rebuildModel(); evaluate(); renderMetrics(); renderNet();
   };
+  // every head needs a whole share of the width, and at least two numbers: with one, q·k is a single
+  // product and attention can barely tell the tokens apart
+  const headsFit = (d, h) => d % h === 0 && d / h >= 2;
+  const syncHeads = () => {
+    [...$('tfHeads').options].forEach((o) => { o.disabled = !headsFit(state.tfD, +o.value); });
+    if (!headsFit(state.tfD, state.tfHeads)) {
+      state.tfHeads = [4, 2, 1].find((h) => h <= state.tfHeads && headsFit(state.tfD, h)) || 1;
+      $('tfHeads').value = String(state.tfHeads);
+    }
+  };
+  syncHeads();
   $('tfD').onchange = (e) => {
-    state.tfD = +e.target.value;
-    // every head needs a whole share of the width
-    if (state.tfD % state.tfHeads) { state.tfHeads = 1; $('tfHeads').value = '1'; }
+    state.tfD = +e.target.value; syncHeads();
     rebuildModel(); evaluate(); renderMetrics(); renderNet();
   };
   $('tfHeads').onchange = (e) => {
-    state.tfHeads = +e.target.value;
-    if (state.tfD % state.tfHeads) { state.tfD = 8; $('tfD').value = '8'; }
+    state.tfHeads = +e.target.value; syncHeads();
     rebuildModel(); evaluate(); renderMetrics(); renderNet();
+  };
+  $('tfTok').onchange = (e) => {
+    state.tfTok = e.target.value; rebuildModel(); evaluate(); renderMetrics(); renderNet();
   };
   $('tfCausal').onchange = (e) => {
     state.tfCausal = e.target.checked; rebuildModel(); evaluate(); renderMetrics(); renderNet();
