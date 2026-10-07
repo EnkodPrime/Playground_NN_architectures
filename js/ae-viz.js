@@ -8,6 +8,7 @@ const AE_IN_W = 128, AE_IN_H = 74, AE_OUT_W = 150, AE_OUT_H = 96;
 /** Node sizes per stage kind. */
 function aeStageNodes(st) {
   if (st.kind === 'units') return [{ w: 94, h: Math.max(90, Math.min(230, st.C * 5 + 12)) }];
+  if (st.kind === 'seq') return [{ w: 132, h: Math.max(90, Math.min(230, st.C * 6 + 12)) }];
   if (st.kind === 'code') {
     const h = st.C > 8 ? 18 : 26;
     return Array.from({ length: st.C }, (_, c) => ({ w: 74, h, ch: c }));
@@ -99,12 +100,14 @@ function aeDraw(ctx, o) {
     const narrow = col.nodes[0].w < 80;
     label(ctx, col.x, col.nodes[0].y - 8, narrow ? st.short || st.label.split(' ·')[0] : st.label);
     const snap = st.snapshot;
+    const oneBox = st.kind === 'units' || st.kind === 'seq';
     col.nodes.forEach((nd, c) => {
-      const isHot = hover && hover.type === 'node' && hover.stage === si && hover.ch === c;
-      const isSel = sel && sel.type === 'node' && sel.stage === si && sel.ch === c;
+      const isHot = hover && hover.type === 'node' && hover.stage === si && (oneBox || hover.ch === c);
+      const isSel = sel && sel.type === 'node' && sel.stage === si && (oneBox || sel.ch === c);
       drawNodeBox(ctx, nd, isHot, isSel);
       if (!snap) return;
       if (st.kind === 'units') aeDrawUnits(ctx, nd, snap, sel && sel.type === 'node' && sel.stage === si ? sel.ch : -1);
+      else if (st.kind === 'seq') aeDrawSeq(ctx, nd, snap, st.C, st.L, isSel ? sel.ch : -1, st.masked);
       else if (st.kind === 'code') aeDrawCode(ctx, nd, snap[c], maxAbs(snap, 0, snap.length), st.part === 'code' ? 'z' + (c + 1) : '');
       else {
         const L = st.L;
@@ -114,11 +117,43 @@ function aeDraw(ctx, o) {
       }
       if (isSel && st.L) {                  // the position being computed
         const t = Math.min(o.tPos, st.L - 1);
-        const px = nd.x + 4 + (st.L <= 1 ? 0 : t * (nd.w - 9) / (st.L - 1));
+        const px = st.kind === 'seq' ? nd.x + 4 + (t + 0.5) * (nd.w - 8) / st.L
+          : nd.x + 4 + (st.L <= 1 ? 0 : t * (nd.w - 9) / (st.L - 1));
         ctx.fillStyle = 'rgba(29,78,216,0.55)';
         ctx.fillRect(px, nd.y + 2, 1.5, nd.h - 4);
       }
     });
+  });
+
+  // MAE: attention above every encoder column, averaged over the heads
+  // (row = token that looks, column = token it looks at; masked tokens are marked on the left)
+  model.stages.forEach((st, si) => {
+    if (!st.tflayer || !st.layer.trace) return;
+    const col = cols[si + 1], A = st.layer.trace.A, T = st.L, H = st.layer.attn.H;
+    const size = Math.min(ATTN_PX, col.nodes[0].w - 6);
+    const x0 = col.x + col.nodes[0].w / 2 - size / 2, y0 = col.nodes[0].y - 22 - size, cs = size / T;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(x0, y0, size, size);
+    for (let i = 0; i < T; i++) {
+      for (let j = 0; j < T; j++) {
+        let a = 0;
+        for (let h = 0; h < H; h++) a += A[(h * T + i) * T + j];
+        a /= H;
+        if (a <= 0) continue;
+        ctx.fillStyle = 'rgba(29,78,216,' + Math.min(1, Math.pow(a, 0.6)).toFixed(3) + ')';
+        ctx.fillRect(x0 + j * cs, y0 + i * cs, cs + 0.3, cs + 0.3);
+      }
+      if (st.masked && st.masked[i]) { ctx.fillStyle = '#e0342b'; ctx.fillRect(x0 - 4, y0 + i * cs, 2.5, cs); }
+    }
+    ctx.strokeStyle = '#cfd6de'; ctx.lineWidth = 1;
+    ctx.strokeRect(x0, y0, size, size);
+    if (sel && sel.type === 'node' && sel.stage === si) {
+      ctx.strokeStyle = '#e0342b'; ctx.lineWidth = 1.4;
+      ctx.strokeRect(x0, y0 + Math.min(o.tPos, T - 1) * cs, size, cs);
+    }
+    ctx.fillStyle = '#98a2ad';
+    ctx.font = '9px system-ui, sans-serif';
+    ctx.fillText(H > 1 ? 'attention · mean of ' + H : 'attention', x0, y0 - 3);
   });
 
   // output: the reconstruction over the input, and the error underneath
@@ -148,6 +183,36 @@ function aeDrawUnits(ctx, nd, vals, hi) {
       ctx.strokeStyle = '#e0342b'; ctx.lineWidth = 1.2;
       ctx.strokeRect(nd.x + 3, top + i * rowH, nd.w - 6, rowH);
     }
+  }
+}
+
+/**
+ * A whole sequence layer in one box: a row per unit (or token dimension), a column per
+ * step, coloured by the value — orange positive, blue negative. Masked tokens are hatched.
+ */
+function aeDrawSeq(ctx, nd, snap, C, L, hi, masked) {
+  const x0 = nd.x + 4, y0 = nd.y + 6, w = nd.w - 8, rowH = (nd.h - 12) / C, cw = w / L;
+  const m = maxAbs(snap, 0, snap.length) || 1;
+  for (let c = 0; c < C; c++) {
+    for (let t = 0; t < L; t++) {
+      const v = snap[c * L + t] / m, a = Math.min(1, Math.abs(v));
+      if (a < 0.02) continue;
+      ctx.fillStyle = (v >= 0 ? 'rgba(194,118,15,' : 'rgba(8,119,189,') + Math.pow(a, 0.7).toFixed(3) + ')';
+      ctx.fillRect(x0 + t * cw, y0 + c * rowH, cw + 0.3, rowH + 0.3);
+    }
+  }
+  if (masked) {
+    ctx.strokeStyle = 'rgba(29,43,56,0.35)'; ctx.lineWidth = 0.8;
+    masked.forEach((on, t) => {
+      if (!on) return;
+      ctx.beginPath();
+      for (let yy = 0; yy < nd.h - 12; yy += 6) { ctx.moveTo(x0 + t * cw, y0 + yy + 6); ctx.lineTo(x0 + (t + 1) * cw, y0 + yy); }
+      ctx.stroke();
+    });
+  }
+  if (hi >= 0) {
+    ctx.strokeStyle = '#e0342b'; ctx.lineWidth = 1.2;
+    ctx.strokeRect(nd.x + 2, y0 + hi * rowH, nd.w - 4, rowH);
   }
 }
 
@@ -215,7 +280,7 @@ function aeHit(layout, mx, my) {
         if (col.kind === 'input') return { type: 'input', nd };
         if (col.kind === 'output') return { type: 'output', nd };
         // a whole dense layer is one box: the row under the cursor picks the unit
-        if (col.kind === 'units') return { type: 'node', stage: col.stage, ch: -1, nd, my };
+        if (col.kind === 'units' || col.kind === 'seq') return { type: 'node', stage: col.stage, ch: -1, nd, my };
         return { type: 'node', stage: col.stage, ch: i, nd };
       }
     }

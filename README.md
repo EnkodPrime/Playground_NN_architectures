@@ -221,8 +221,14 @@ everything else badly, so the reconstruction error is an anomaly score that need
 * **MLP AE** — dense 128 → hidden (tanh) → k → hidden (tanh) → 128
 * **Conv AE** — three convolution + ReLU + max-pool steps (128 → 64 → 32 → 16), a dense layer to
   the code, and back with upsampling + convolution
+* **LSTM AE** — sequence to sequence: an LSTM (or GRU) reads the window sample by sample, its last
+  state becomes the code, and a second one unrolls the window from the code repeated at every step
+* **Transformer MAE** — a masked autoencoder: 16 patches of 8 samples, some replaced by a learned
+  [MASK] vector, and self-attention fills them in from the rest. No bottleneck; to score a window
+  it runs four times, each time hiding every fourth patch, so every patch is predicted unseen
 
-Options: code size k (1–16), hidden units or filters, *Train on* clean mains only or every
+Options: code size k (1–16), hidden units, filters, cell and units, encoder layers and the share
+of patches masked in training, a **VAE** switch with its KL weight β, *Train on* clean mains only or every
 checked class, a **denoising** mode (noisier input, noise-free target) and the same learning rate,
 batch and *Run for* controls as the classifier. The diagram draws the encoder, the code and the
 decoder; clicking a unit, a code number or an output sample opens its arithmetic and data-flow
@@ -241,12 +247,21 @@ Measured on all 8 classes, 40 epochs, trained on clean mains only:
 |---|---|---|---|
 | MLP AE | 0.976–0.993 | over / under 0.91–0.99 | 97–100% |
 | Conv AE | 0.954–0.987 | over / under 0.87–0.88 in the weaker run | 89–90% |
+| LSTM AE | 0.81–0.95 (0.96 after 100 epochs) | burst, ripple, drift | 59–92% |
+| Transformer MAE | 0.82–0.97 (0.94–0.97 after 100) | over / under | 94–100% |
+
+The MAE has no code size; its row is for 50% of the patches hidden in training.
 
 * At k = 2 the clean windows form a **ring** in the latent space — amplitude and phase. With k = 1
   the clean error stays about 40 times larger and the mean AUC is about 0.6 (MLP, 20 epochs:
   k = 1 → 0.60, 2 → 0.91, 4 → 0.99, 16 → 0.99).
 * Training on every class instead of clean only lowered the mean AUC just a little (MLP: 0.970 at
   k = 2, 0.975 at k = 16); the frequency drifts lose most.
+* The sequence models are slower (LSTM about 0.6 s per epoch, MAE 0.17 s, MLP 0.02 s) and vary
+  more from run to run; a run whose clean error stays high also stays low in AUC.
+* **Generate** decodes codes drawn from N(0, 1). At k = 8 a plain autoencoder turns them into
+  windows of which only 38% (MLP) or 41% (conv) of the energy is a 50 Hz sine; a VAE (β = 0.01)
+  gives 98% and 93%. The cost is detection: mean AUC 0.99 → 0.91 (MLP) and 0.98 → 0.89 (conv).
 * Denoising, k = 8, added noise 0.1: the MLP raised the SNR from 16.5 to 26.6 dB against 23.0 dB
   for a 5-point moving average; the convolutional autoencoder reached 22.2 dB, no better than the
   filter.
@@ -273,9 +288,9 @@ Measured on all 8 classes, 40 epochs, trained on clean mains only:
 | `js/main.js` | state, UI, training loop, arithmetic panel |
 | `js/flow.js` | data-flow diagrams of the selected node, drawn as SVG |
 | `js/ui.js` | layout shared by both pages: resizable columns |
-| `js/ae-models.js` | autoencoders: MLP and convolutional, upsampling, bottleneck (plain or variational) |
-| `js/ae-viz.js` | autoencoder diagram: units, code, maps and the reconstruction box |
-| `js/ae-main.js` | autoencoder page: training, AUC, localisation, latent space, code-size sweep |
+| `js/ae-models.js` | autoencoders: MLP, convolutional, LSTM / GRU sequence to sequence, masked Transformer; upsampling, bottleneck (plain or variational) |
+| `js/ae-viz.js` | autoencoder diagram: units, code, maps, state and token heatmaps, attention, the reconstruction box |
+| `js/ae-main.js` | autoencoder page: training, AUC, localisation, latent space, generation, code-size sweep |
 
 ## Contributing
 

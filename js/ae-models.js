@@ -180,6 +180,9 @@ class MLPAE extends AEBase {
     this.e1.backward(this.a1.backward(d));
     return this.bn.kl();
   }
+
+  /** The decoder alone: a window from a code. */
+  decode(z) { return this.d2.forward(this.a2.forward(this.d1.forward(z), 1)); }
 }
 
 /* --------------------------------------------------------------- Conv AE */
@@ -255,5 +258,216 @@ class ConvAE extends AEBase {
       d = s.conv.backward(s.act.backward(s.pool.backward(d)));
     }
     return this.bn.kl();
+  }
+
+  decode(z) {
+    let a = this.da.forward(this.dd.forward(z), 1), L = 16;
+    this.dec.forEach((s) => {
+      const u = s.up.forward(a, L);
+      L *= 2;
+      const c = s.conv.forward(u, L);
+      a = s.act ? s.act.forward(c, L) : c;
+    });
+    return a;
+  }
+}
+
+/* --------------------------------------------------------------- LSTM AE */
+/**
+ * Sequence to sequence: an encoder LSTM reads the 128 samples one by one and its
+ * last state becomes the code; a decoder LSTM gets the code at every step and a
+ * linear readout turns its state into the sample (Srivastava et al. 2015).
+ */
+class LSTMAE extends AEBase {
+  /** @param {{units:number, k:number, cell:string, vae:boolean, beta:number}} cfg */
+  constructor(cfg) {
+    super();
+    this.kind = 'lstm';
+    this.setup(cfg);
+    const H = cfg.units, k = cfg.k, cell = cfg.cell || 'lstm';
+    this.H = H; this.k = k;
+    this.enc = new RNNDir(cell, 1, H);
+    this.bn = new Bottleneck(H, k, cfg.vae, cfg.beta);
+    this.dec = new RNNDir(cell, k, H);
+    this.head = new Conv1D(H, 1, 1, 1, false);      // the same weights at every step
+    this.params = [...this.enc.params, ...this.bn.params, ...this.dec.params, this.head];
+    const name = cell.toUpperCase();
+    this.stages = [
+      { kind: 'seq', part: 'enc', label: 'ENCODER · ' + name + ' · ' + H + ' units', short: 'ENC', C: H, L: WIN, rnn: this.enc },
+      { kind: 'code', part: 'code', label: 'CODE · k = ' + k + (cfg.vae ? ' · VAE' : ''), C: k, dense: this.bn.mu },
+      { kind: 'seq', part: 'dec', label: 'DECODER · ' + name + ' · ' + H + ' units', short: 'DEC', C: H, L: WIN, rnn: this.dec },
+    ];
+    this.outStep = { conv: this.head };
+  }
+
+  forward(x, keep, training) {
+    const L = WIN, H = this.H, k = this.k;
+    const hs = this.enc.forward(x, L, false);
+    const last = new Float32Array(H);
+    for (let u = 0; u < H; u++) last[u] = hs[u * L + L - 1];
+    const z = this.bn.forward(last, training);
+    this.code = this.bn.m;
+    const zin = new Float32Array(k * L);             // the code, repeated at every step
+    for (let i = 0; i < k; i++) zin.fill(z[i], i * L, (i + 1) * L);
+    const hd = this.dec.forward(zin, L, false);
+    const y = this.head.forward(hd, L);
+    if (keep) {
+      const s = this.stages;
+      s[0].input = x; s[0].snapshot = hs;
+      s[1].input = last; s[1].snapshot = this.bn.m.slice(); s[1].z = z.slice();
+      s[2].input = zin; s[2].snapshot = hd;
+      this.input = x; this.outInput = hd; this.out = y.slice();
+    }
+    return y;
+  }
+
+  backward(g) {
+    const L = WIN, H = this.H, k = this.k;
+    const dzin = this.dec.backward(this.head.backward(g));
+    const dz = new Float32Array(k);
+    for (let i = 0; i < k; i++) { let s = 0; for (let t = 0; t < L; t++) s += dzin[i * L + t]; dz[i] = s; }
+    const dlast = this.bn.backward(dz);
+    const dhs = new Float32Array(H * L);
+    for (let u = 0; u < H; u++) dhs[u * L + L - 1] = dlast[u];
+    this.enc.backward(dhs);
+    return this.bn.kl();
+  }
+
+  decode(z) {
+    const L = WIN, zin = new Float32Array(this.k * L);
+    for (let i = 0; i < this.k; i++) zin.fill(z[i], i * L, (i + 1) * L);
+    return this.head.forward(this.dec.forward(zin, L, false), L);
+  }
+}
+
+/* ---------------------------------------------------- Transformer MAE */
+/**
+ * Masked autoencoder (He et al. 2021): the window is cut into 16 patches of 8
+ * samples, some patches are replaced by a learned [MASK] token, and the
+ * Transformer has to fill them in from the ones it can see. There is no
+ * bottleneck — what makes it an autoencoder is that the hidden patches have to
+ * be predicted from the context. To score a whole window it is run four times,
+ * each time hiding every fourth patch, so every patch gets predicted once.
+ */
+const MAE_GROUPS = 4;
+
+class MAEAE extends AEBase {
+  /** @param {{d:number, heads:number, layers:number, maskRatio:number}} cfg */
+  constructor(cfg) {
+    super();
+    this.kind = 'mae';
+    this.setup(cfg);
+    const d = cfg.d, T = WIN / TF_PATCH;
+    this.d = d; this.T = T;
+    this.embed = new TokenLinear(TF_PATCH, d);
+    this.pos = makeParam(T, d, 0.1, 0);                // a learned vector per position
+    this.mtok = makeParam(1, d, 0.1, 0);               // the [MASK] token
+    this.layers = Array.from({ length: cfg.layers }, () => new EncoderLayer(d, cfg.heads, false));
+    this.lnF = new TokenLayerNorm(d);
+    this.head = new TokenLinear(d, TF_PATCH);
+    this.params = [this.embed, this.pos, this.mtok, ...this.layers.flatMap((l) => l.params), this.lnF, this.head];
+    this.stages = [{ kind: 'seq', part: 'enc', label: 'EMBED · ' + d + ' dims · ' + T + ' tokens', short: 'EMBED', C: d, L: T, tfembed: true }];
+    this.layers.forEach((layer, i) => this.stages.push({
+      kind: 'seq', part: 'enc', label: 'ENCODER ' + (i + 1) + ' · attention', short: 'ENC ' + (i + 1), C: d, L: T, tflayer: true, layer,
+    }));
+    this.viewGroup = 0;
+  }
+
+  /** Token-major T×d → channel-major d×T, the layout the diagram draws. */
+  toMaps(X) { return TransformerNet.prototype.toMaps.call(this, X); }
+
+  /** A random mask: round(ratio·16) of the patches hidden, at least one, at most 15. */
+  randomMask() {
+    const T = this.T, n = Math.max(1, Math.min(T - 1, Math.round(this.cfg.maskRatio * T)));
+    const idx = Array.from({ length: T }, (_, i) => i);
+    for (let i = T - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [idx[i], idx[j]] = [idx[j], idx[i]]; }
+    const m = new Uint8Array(T);
+    for (let i = 0; i < n; i++) m[idx[i]] = 1;
+    return m;
+  }
+  groupMask(g) { const m = new Uint8Array(this.T); for (let p = g; p < this.T; p += MAE_GROUPS) m[p] = 1; return m; }
+
+  /** One pass with a given mask; returns the 128 predicted samples (only the masked patches matter). */
+  pass(x, mask, keep) {
+    const { T, d } = this;
+    const E = this.embed.forward(x, T);              // 128 samples already are 16 patches of 8 in a row
+    const X0 = new Float32Array(T * d);
+    for (let t = 0; t < T; t++) {
+      for (let i = 0; i < d; i++) X0[t * d + i] = (mask[t] ? this.mtok.W[i] : E[t * d + i]) + this.pos.W[t * d + i];
+    }
+    this.mask = mask;
+    let X = X0;
+    const outs = [];
+    this.layers.forEach((layer) => { X = layer.forward(X, T, keep); if (keep) outs.push(X); });
+    const N = this.lnF.forward(X, T);
+    const Y = this.head.forward(N, T);
+    let n = 0;
+    const pooled = new Float32Array(d);               // the mean of the visible tokens: a summary for the latent plot
+    for (let t = 0; t < T; t++) if (!mask[t]) { n++; for (let i = 0; i < d; i++) pooled[i] += N[t * d + i]; }
+    for (let i = 0; i < d; i++) pooled[i] /= Math.max(1, n);
+    if (keep) {
+      this.E = E; this.X0 = X0; this.N = N; this.Y = Y;
+      this.stages[0].snapshot = this.toMaps(X0); this.stages[0].masked = mask; this.stages[0].input = x;
+      outs.forEach((o, i) => { this.stages[i + 1].snapshot = this.toMaps(o); this.stages[i + 1].masked = mask; });
+    }
+    return { Y, pooled };
+  }
+
+  forward(x, keep, training) {
+    if (training) { const r = this.pass(x, this.randomMask(), false); this.code = r.pooled; return r.Y; }
+    // four passes, every fourth patch hidden in each; the pass on view runs last so its trace stays
+    const y = new Float32Array(WIN), code = new Float32Array(this.d);
+    const order = [];
+    for (let g = 0; g < MAE_GROUPS; g++) if (g !== this.viewGroup) order.push(g);
+    order.push(this.viewGroup);
+    order.forEach((g, n) => {
+      const r = this.pass(x, this.groupMask(g), keep && n === order.length - 1);
+      for (let p = g; p < this.T; p += MAE_GROUPS) for (let j = 0; j < TF_PATCH; j++) y[p * TF_PATCH + j] = r.Y[p * TF_PATCH + j];
+      for (let i = 0; i < this.d; i++) code[i] += r.pooled[i] / MAE_GROUPS;
+    });
+    this.code = code;
+    if (keep) { this.input = x; this.out = y.slice(); }
+    return y;
+  }
+
+  /** Only the hidden patches count: predicting what it can see would be trivial. */
+  trainBatch(inputs, targets, lr, l2) {
+    this.zeroGrads();
+    let loss = 0;
+    const n = inputs.length;
+    for (let b = 0; b < n; b++) {
+      const y = this.forward(inputs[b], false, true), t = targets[b], mask = this.mask;
+      let nm = 0;
+      for (let p = 0; p < this.T; p++) nm += mask[p];
+      const cnt = nm * TF_PATCH, g = new Float32Array(WIN);
+      let l = 0;
+      for (let p = 0; p < this.T; p++) {
+        if (!mask[p]) continue;
+        for (let j = 0; j < TF_PATCH; j++) {
+          const i = p * TF_PATCH + j, e = y[i] - t[i];
+          l += e * e; g[i] = 2 * e / cnt;
+        }
+      }
+      loss += l / cnt;
+      this.backward(g);
+    }
+    this.step(lr, 1 / n, l2);
+    return loss / n;
+  }
+
+  backward(g) {
+    const { T, d } = this;
+    let dX = this.lnF.backward(this.head.backward(g));
+    for (let l = this.layers.length - 1; l >= 0; l--) dX = this.layers[l].backward(dX);
+    const dE = new Float32Array(T * d);
+    for (let t = 0; t < T; t++) {
+      for (let i = 0; i < d; i++) {
+        const v = dX[t * d + i];
+        this.pos.gW[t * d + i] += v;
+        if (this.mask[t]) this.mtok.gW[i] += v; else dE[t * d + i] = v;
+      }
+    }
+    this.embed.backward(dE);
+    return 0;
   }
 }

@@ -1,12 +1,14 @@
 /* ae-main.js — the autoencoder playground: state, data, training loop, results and UI. */
 
 const state = {
-  kind: 'mlp',                 // 'mlp' | 'conv'
+  kind: 'mlp',                 // 'mlp' | 'conv' | 'lstm' | 'mae'
   classes: ['clean', 'ripple', 'harm', 'spike', 'sag'],
   trainOn: 'clean',            // 'clean': learn only what normal looks like · 'all': every checked class
   k: 2,                        // code size
   hidden: 32,                  // MLP width
   filters: 4,                  // Conv AE channels
+  cell: 'lstm', units: 16,     // LSTM AE
+  maeLayers: 2, maskRatio: 0.5, // Transformer MAE (16 dimensions, 2 heads)
   vae: false, beta: 0.003,
   denoise: false, dnNoise: 0.1,
   lr: 0.003, batch: 16, l2: 0,
@@ -71,10 +73,17 @@ function pairOf(ds, i) {
 }
 
 /* ------------------------------------------------------------- model */
+/** A fresh autoencoder of the current kind with code size k. */
+function makeModel(k) {
+  const base = { k, vae: state.vae, beta: state.beta };
+  if (state.kind === 'conv') return new ConvAE({ ...base, filters: state.filters });
+  if (state.kind === 'lstm') return new LSTMAE({ ...base, units: state.units, cell: state.cell });
+  if (state.kind === 'mae') return new MAEAE({ d: 16, heads: 2, layers: state.maeLayers, maskRatio: state.maskRatio });
+  return new MLPAE({ ...base, hidden: state.hidden });
+}
+
 function buildModel() {
-  const base = { k: state.k, vae: state.vae, beta: state.beta };
-  model = state.kind === 'conv' ? new ConvAE({ ...base, filters: state.filters })
-    : new MLPAE({ ...base, hidden: state.hidden });
+  model = makeModel(state.k);
   state.epoch = 0;
   if (state.stopAt !== null) armRun();
   hTrain = []; hTest = []; lastEval = null;
@@ -82,7 +91,7 @@ function buildModel() {
   $('paramCount').textContent = model.paramCount().toLocaleString('en-US') + ' parameters';
 }
 
-function rebuild() { buildModel(); evaluate(); renderMetrics(); renderNet(); renderMath(true); }
+function rebuild() { buildModel(); evaluate(); renderMetrics(); renderNet(); renderMath(true); generate(); }
 
 /* ------------------------------------------------------ training loop */
 function trainOneBatch() {
@@ -124,7 +133,7 @@ function loop() {
     if (runFinished()) {
       setRunning(false);
       state.stopAt = null;
-      evaluate(); renderMetrics(); renderRunTarget();
+      evaluate(); renderMetrics(); renderRunTarget(); generate();
     } else if (frameNo % 20 === 0) {
       evaluate(); renderMetrics();
     }
@@ -273,7 +282,7 @@ function drawLatent() {
   ctx.arc(sx(pp[0]), sy(k1 ? rows[CLASS_INDEX[state.probeClassId]] || 0 : pp[1]), 5.5, 0, 6.284);
   ctx.stroke();
   ctx.fillStyle = '#98a2ad'; ctx.font = '10px system-ui,sans-serif';
-  ctx.fillText(pr.how + ' · ring: the inspected window', 2, h - 6);
+  ctx.fillText((state.kind === 'mae' ? 'mean of the visible tokens (16 numbers), PCA' : pr.how) + ' · ring: the inspected window', 2, h - 6);
 }
 
 /* ------------------------------------------------------------ rendering */
@@ -309,12 +318,17 @@ function renderMetrics() {
 function renderNet() {
   const wrap = $('netWrap');
   const cssW = Math.max(420, wrap.clientWidth - 2);
+  // MAE: with a sample of the output selected, show the pass that hides its patch
+  if (model.kind === 'mae' && state.selected && state.selected.type === 'output') {
+    model.viewGroup = Math.floor(state.tPos / TF_PATCH) % MAE_GROUPS;
+  }
   recon = Float32Array.from(model.forward(state.probe, true, false));
+  const masked = model.kind === 'mae' ? model.stages[0].masked : null;
   layout = aeLayout(model, cssW);
   netCtx = dpiSetup($('net'), layout.width, layout.height);
   aeDraw(netCtx, {
     model, layout, probe: state.probe, recon, hover: state.hover, sel: state.selected, tPos: state.tPos,
-    mode: state.mode, mask: state.probeMeta && state.probeMeta.mask,
+    mode: state.mode, mask: state.probeMeta && state.probeMeta.mask, masked,
   });
   const rc = $('recon'), w = rc.clientWidth || 260;
   const ctx = dpiSetup(rc, w, 110);
@@ -402,41 +416,275 @@ function codeStage() { return model.stages.find((s) => s.kind === 'code'); }
 function clampT(max) { state.tPos = Math.max(0, Math.min(max, state.tPos)); return state.tPos; }
 
 /** Builds the cell diagram, the title and the arithmetic for whatever is selected. */
+/** Labels and tooltips of the pipeline overview for each kind. */
+function pipelineText() {
+  const cell = state.cell.toUpperCase();
+  return {
+    mlp: { enc: 'dense ' + WIN + ' → ' + state.hidden + ' → ' + state.k, dec: 'dense ' + state.k + ' → ' + state.hidden + ' → ' + WIN,
+      encTip: 'a dense layer of ' + state.hidden + ' tanh units over all 128 samples, then a dense layer to the code',
+      decTip: 'a dense layer of ' + state.hidden + ' tanh units, then a dense layer to 128 samples' },
+    conv: { enc: '3 × conv + pool, dense', dec: 'dense, 3 × up + conv',
+      encTip: 'three convolutions with ReLU and max pooling (128 → 64 → 32 → 16 positions), then a dense layer to the code',
+      decTip: 'a dense layer back to 16 positions, then three upsample → convolution steps to 128 samples' },
+    lstm: { enc: cell + ' ' + state.units + ', last state', dec: cell + ' ' + state.units + ', readout',
+      encTip: 'a ' + cell + ' of ' + state.units + ' units reads the 128 samples in order; its state after the last one is mapped to the code',
+      decTip: 'a ' + cell + ' gets the code at every one of the 128 steps; a linear readout turns its state into the sample' },
+    mae: { enc: '16 patches, ' + state.maeLayers + ' × attention', dec: 'linear head per token',
+      encTip: 'every patch of 8 samples becomes a token; hidden patches get the [MASK] vector; ' + state.maeLayers + ' encoder layer(s) of self-attention',
+      decTip: 'one linear map turns every token back into 8 samples — only the hidden patches count' },
+  }[state.kind];
+}
+
 function selectionMath() {
   const sel = state.selected, x = state.probe;
-  const encTip = state.kind === 'conv'
-    ? 'three convolutions with ReLU and max pooling (128 → 64 → 32 → 16 positions), then a dense layer to the code'
-    : 'a dense layer of ' + state.hidden + ' tanh units over all 128 samples, then a dense layer to the code';
-  const decTip = state.kind === 'conv'
-    ? 'a dense layer back to 16 positions, then three upsample → convolution steps to 128 samples'
-    : 'a dense layer of ' + state.hidden + ' tanh units, then a dense layer to 128 samples';
+  const pt = pipelineText(), mae = state.kind === 'mae';
 
   if (!sel || sel.type === 'input') {
     const t = clampT(WIN - 1);
+    const code = mae ? Array.from(model.code) : Array.from(codeStage().snapshot);
     const flow = Flow.aePipeline({
-      x, y: recon, code: Array.from(codeStage().snapshot), t, mse: mse(x, recon), mask: state.probeMeta && state.probeMeta.mask,
-      encLabel: state.kind === 'conv' ? '3 × conv + pool, dense' : 'dense ' + WIN + ' → ' + state.hidden + ' → ' + state.k,
-      decLabel: state.kind === 'conv' ? 'dense, 3 × up + conv' : 'dense ' + state.k + ' → ' + state.hidden + ' → ' + WIN,
-      encTip, decTip, vae: state.vae,
+      x, y: recon, code, t, mse: mse(x, recon), mask: state.probeMeta && state.probeMeta.mask,
+      encLabel: pt.enc, decLabel: pt.dec, encTip: pt.encTip, decTip: pt.decTip, vae: state.vae && !mae,
+      codeLabel: mae ? 'mean of the visible tokens' : null,
+      codeTip: mae ? 'no bottleneck in a masked autoencoder: this summary only feeds the latent plot' : null,
     });
     let html = '<h4>1 · What the network does</h4>';
-    html += '<div class="formula">x (' + WIN + ' numbers) → encoder → z (' + state.k + ' number' + (state.k > 1 ? 's' : '') + ') → decoder → x̂ (' + WIN +
-      ' numbers) &nbsp;&nbsp; loss = mean (x̂ − ' + (state.denoise ? 'x<sub>clean</sub>' : 'x') + ')²</div>';
+    if (mae) {
+      html += '<div class="formula">x (16 patches of 8) → hide some patches → Transformer → a prediction for every patch → x̂ &nbsp;&nbsp; ' +
+        'loss = mean (x̂ − ' + (state.denoise ? 'x<sub>clean</sub>' : 'x') + ')² <b>over the hidden patches only</b></div>';
+      html += '<div class="formula" style="margin-top:6px"><span class="op">Training hides ' + Math.round(state.maskRatio * 100) +
+        '% of the patches at random. To score a window the network runs four times, hiding patches 0, 4, 8, 12 — then 1, 5, 9, 13 — and so on, ' +
+        'so every patch is predicted once from its context and never copied.</span></div>';
+    } else {
+      html += '<div class="formula">x (' + WIN + ' numbers) → encoder → z (' + state.k + ' number' + (state.k > 1 ? 's' : '') + ') → decoder → x̂ (' + WIN +
+        ' numbers) &nbsp;&nbsp; loss = mean (x̂ − ' + (state.denoise ? 'x<sub>clean</sub>' : 'x') + ')²' +
+        (state.vae ? ' + β · KL( N(μ, σ²) ‖ N(0, 1) )' : '') + '</div>';
+    }
     html += '<div class="formula" style="margin-top:6px"><span class="op">' + (state.trainOn === 'clean'
       ? 'Trained on clean mains only: the decoder learns to rebuild what normal looks like. A window it cannot rebuild is unusual — ' +
         'its error is the anomaly score, and no window needed a label.'
       : 'Trained on every checked class: the code has to describe the disturbances too, so they rebuild well and the score ' +
         'no longer singles them out.') + '</span></div>';
     html += '<h4>2 · This window</h4>';
-    html += '<div class="formula">z = [ ' + Array.from(codeStage().snapshot).map(n3).join(', ') + ' ] &nbsp;&nbsp; error = <span class="res">' +
+    html += '<div class="formula">' + (mae ? '' : 'z = [ ' + code.map(n3).join(', ') + ' ] &nbsp;&nbsp; ') + 'error = <span class="res">' +
       mse(x, recon).toFixed(5) + '</span>  <span class="op">at t = ' + t + ': x = ' + n3(x[t]) + ', x̂ = ' + n3(recon[t]) + '</span></div>';
     return { flow, title: sel ? 'Input · the whole autoencoder' : 'The whole autoencoder', html, tMax: WIN - 1, tLabel: 't = ' + t };
   }
 
-  if (sel.type === 'output') return outputMath();
+  if (sel.type === 'output') return mae ? maeOutputMath() : outputMath();
   const st = model.stages[sel.stage];
+  if (st.rnn) return seqRnnMath(st, sel);
+  if (st.tfembed) return maeEmbedMath(st, sel);
+  if (st.tflayer) return maeAttnMath(st, sel);
   if (st.kind === 'units' || st.kind === 'code' || (st.kind === 'map' && st.dense)) return denseStageMath(st, sel);
   return convStageMath(st, sel);
+}
+
+/* ------------------------------------------------- recurrent stages */
+const AE_GATES = {
+  lstm: [['i', 'σ', 'input gate'], ['f', 'σ', 'forget gate'], ['o', 'σ', 'output gate'], ['g', 'tanh', 'candidate']],
+  gru: [['z', 'σ', 'update gate'], ['r', 'σ', 'reset gate'], ['n', 'tanh', 'candidate']],
+  rnn: [['h', 'tanh', 'state']],
+};
+
+/** One step of one unit of a recurrent pass, in the form Flow.lstm / Flow.gru draw. */
+function rnnStepDetail(dir, u, t) {
+  const H = dir.H, G = dir.G, D = dir.D, L = dir.L;
+  const hprev = new Float32Array(H);
+  for (let v = 0; v < H; v++) hprev[v] = dir.hs[t * H + v];
+  const gates = [], wx = [], wh = [], bias = [];
+  for (let g = 0; g < G; g++) {
+    gates.push(dir.gs[t * G * H + g * H + u]);
+    bias.push(dir.px.b[g * H + u]);
+    wx.push(dir.px.W.slice((g * H + u) * D, (g * H + u + 1) * D));
+    wh.push(dir.ph.W.slice((g * H + u) * H, (g * H + u + 1) * H));
+  }
+  const xv = new Float32Array(D);
+  for (let d = 0; d < D; d++) xv[d] = dir.x[d * L + t];
+  return {
+    dir, u, back: false, s: t, t, H, G, D, L, kind: dir.kind, hprev, gates, wx, wh, bias, xv,
+    h: dir.hs[(t + 1) * H + u],
+    c: dir.cs ? dir.cs[(t + 1) * H + u] : null, cprev: dir.cs ? dir.cs[t * H + u] : null,
+    q: dir.qs ? dir.qs[t * H + u] : null,
+  };
+}
+
+function seqRnnMath(st, sel) {
+  const u = Math.max(0, sel.ch), t = clampT(WIN - 1), d = rnnStepDetail(st.rnn, u, t), enc = st.part === 'enc';
+  const gates = AE_GATES[d.kind];
+  const formulas = {
+    rnn: 'h<sub>t</sub> = tanh( W<sub>x</sub>·x<sub>t</sub> + W<sub>h</sub>·h<sub>t−1</sub> + b )',
+    gru: 'z, r = σ(·) &nbsp; n = tanh( W<sub>n</sub>x<sub>t</sub> + r ⊙ (U<sub>n</sub>h<sub>t−1</sub>) + b<sub>n</sub> ) &nbsp;→&nbsp; h<sub>t</sub> = (1−z)⊙n + z⊙h<sub>t−1</sub>',
+    lstm: 'i, f, o = σ(·) &nbsp; g = tanh(·) &nbsp;→&nbsp; c<sub>t</sub> = f⊙c<sub>t−1</sub> + i⊙g &nbsp;→&nbsp; h<sub>t</sub> = o⊙tanh(c<sub>t</sub>)',
+  };
+  let html = '<h4>1 · The ' + (enc ? 'encoder' : 'decoder') + ' cell — ' + d.kind.toUpperCase() + '</h4><div class="formula">' + formulas[d.kind] + '</div>';
+  html += '<div class="formula" style="margin-top:6px"><span class="op">' + (enc
+    ? 'x<sub>t</sub> is sample t of the window. Only the state after the last sample (t = ' + (WIN - 1) + ') goes on to the code — ' +
+      'everything the decoder learns about the window has to survive the trip through these 128 steps.'
+    : 'x<sub>t</sub> is the code z = [ ' + Array.from(d.xv).map(n3).join(', ') + ' ], the same at every step: the cell has to unroll the window ' +
+      'from it on its own, keeping track of where in the cycle it is through its state.') + '</span></div>';
+  html += '<h4>2 · The gates at t = ' + t + '</h4><div class="scrollx"><table class="mtab"><thead><tr><th>gate</th>' +
+    '<th>W<sub>x</sub>·x<sub>t</sub></th><th>W<sub>h</sub>·h<sub>t−1</sub></th><th>bias</th><th>pre-activation</th><th>value</th></tr></thead><tbody>';
+  gates.forEach(([nm, fn, desc], g) => {
+    let ix = 0, ih = 0;
+    for (let i = 0; i < d.D; i++) ix += d.wx[g][i] * d.xv[i];
+    for (let v = 0; v < d.H; v++) ih += d.wh[g][v] * d.hprev[v];
+    const cand = d.kind === 'gru' && g === 2, rec = cand ? d.gates[1] * d.q : ih;
+    html += '<tr><td class="ch">' + nm + ' = ' + fn + '(·) <span style="color:#98a2ad">' + desc + '</span></td><td>' + n4(ix) + '</td><td>' + n4(rec) +
+      (cand ? ' <span style="color:#98a2ad">= r·' + n3(d.q) + '</span>' : '') + '</td><td>' + n3(d.bias[g]) + '</td><td>' + n4(ix + rec + d.bias[g]) +
+      '</td><td class="sum">' + n4(d.gates[g]) + '</td></tr>';
+  });
+  html += '</tbody></table></div>';
+  let upd = '';
+  if (d.kind === 'lstm') upd = 'c = f·c<sub>t−1</sub> + i·g = ' + n3(d.gates[1]) + '·' + n3(d.cprev) + ' + ' + n3(d.gates[0]) + '·' + n3(d.gates[3]) + ' = ' + n4(d.c) +
+    ' &nbsp; h = o·tanh(c) = ' + n3(d.gates[2]) + '·' + n3(Math.tanh(d.c));
+  else if (d.kind === 'gru') upd = 'h = (1−z)·n + z·h<sub>t−1</sub> = ' + n3(1 - d.gates[0]) + '·' + n3(d.gates[2]) + ' + ' + n3(d.gates[0]) + '·' + n3(d.hprev[u]);
+  else upd = 'h = tanh(·)';
+  const shown = st.snapshot[u * st.L + t];
+  html += '<div class="formula" style="margin-top:8px">' + upd + ' = <span class="res">' + n4(d.h) + '</span>  <span class="op">check: the box holds ' +
+    n4(shown) + (Math.abs(shown - d.h) < 1e-4 ? ' ✓ matches' : ' ⚠ mismatch') + '</span></div>';
+  if (!enc) {
+    const w = model.head.W[u], contrib = w * d.h;
+    html += '<div class="formula" style="margin-top:6px"><span class="op">Readout: x̂[' + t + '] = Σ<sub>u</sub> w<sub>u</sub>·h<sub>u</sub>[' + t + '] + b; ' +
+      'this unit adds ' + n3(w) + ' · ' + n3(d.h) + ' = ' + n4(contrib) + '</span></div>';
+  }
+  const title = (enc ? 'Encoder' : 'Decoder') + ' · unit ' + (u + 1) + ' · t = ' + t + ' · ' + d.kind.toUpperCase();
+  return { flow: Flow[d.kind](d), title, html, tMax: WIN - 1, tLabel: 't = ' + t };
+}
+
+/* ------------------------------------------------------ MAE stages */
+function tokLabel(t) {
+  return 'token ' + t + ' (' + (t * TF_PATCH / SR * 1000).toFixed(1) + '–' + ((t + 1) * TF_PATCH / SR * 1000).toFixed(1) + ' ms)';
+}
+
+function maeEmbedMath(st, sel) {
+  const ch = Math.max(0, sel.ch), T = st.L, d = model.d, t = clampT(T - 1), start = t * TF_PATCH;
+  const hidden = !!st.masked[t], pos = model.pos.W[t * d + ch], shown = st.snapshot[ch * T + t];
+  let flow, html, out;
+  if (hidden) {
+    const m = model.mtok.W[ch];
+    out = m + pos;
+    flow = Flow.maeMask({ mtok: Array.from(model.mtok.W), m, pos, out, start }, { t, ch });
+    html = '<h4>1 · A hidden patch</h4><div class="formula">token[' + t + '][' + (ch + 1) + '] = [MASK][' + (ch + 1) + '] + pos[' + t + '][' + (ch + 1) + '] = ' +
+      n4(m) + ' + ' + n4(pos) + ' = <span class="res">' + n4(out) + '</span></div><div class="formula" style="margin-top:6px"><span class="op">' +
+      'Samples ' + start + '–' + (start + 7) + ' never reach the network in this pass. All hidden patches share one learned vector; only the ' +
+      'position vector tells them apart, so attention has to work out from the visible neighbours what belongs here.</span></div>';
+  } else {
+    const E = model.embed, xs = [], ws = [];
+    let sum = 0;
+    for (let j = 0; j < TF_PATCH; j++) { xs.push(state.probe[start + j]); ws.push(E.W[ch * TF_PATCH + j]); sum += xs[j] * ws[j]; }
+    const b = E.b[ch], z = sum + b;
+    out = z + pos;
+    flow = Flow.tfEmbed({ xs, ws, b, pos, sum, z, out, start }, { t, ch });
+    html = '<h4>1 · From patch to token</h4><div class="formula">token[' + t + '][' + (ch + 1) + '] = Σ<sub>j</sub> W<sub>e</sub>[' + (ch + 1) + '][j] · x[' + start +
+      ' + j] + b + pos = ' + n4(sum) + ' + ' + n4(b) + ' + ' + n4(pos) + ' = <span class="res">' + n4(out) + '</span></div>' +
+      '<div class="formula" style="margin-top:6px"><span class="op">A visible patch: its 8 samples go in through the same linear map every patch uses.</span></div>';
+  }
+  html += '<div class="formula" style="margin-top:6px"><span class="op">check: the box holds ' + n4(shown) + (Math.abs(shown - out) < 1e-4 ? ' ✓ matches' : ' ⚠ mismatch') + '</span></div>';
+  return { flow, title: 'Embedding · dimension ' + (ch + 1) + ' · ' + tokLabel(t) + (hidden ? ' · hidden' : ''), html, tMax: T - 1, tLabel: tokLabel(t) };
+}
+
+function maeAttnMath(st, sel) {
+  const ch = Math.max(0, sel.ch), T = st.L, d = model.d, t = clampT(T - 1);
+  const tr = st.layer.trace, at = st.layer.attn, H = at.H, dh = at.dh, head = Math.floor(ch / dh);
+  const vec = (arr) => Array.from(arr.subarray(t * d, (t + 1) * d));
+  const row = (arr) => Array.from(arr.subarray((head * T + t) * T, (head * T + t) * T + T));
+  const flow = Flow.attention({
+    x: vec(tr.X), n1: vec(tr.n1), a: row(tr.A), scores: row(tr.S), head, o: vec(tr.O),
+    attn: vec(tr.a), h: vec(tr.h), n2: vec(tr.n2), z2: vec(tr.z2), out: vec(tr.out), causal: false,
+  }, { li: sel.stage, ch, t });
+  let html = '<h4>1 · The encoder layer</h4><div class="formula">h = x + W<sub>o</sub>·Attention(LN<sub>1</sub>(x)) &nbsp;&nbsp; y = h + W<sub>2</sub>·ReLU(W<sub>1</sub>·LN<sub>2</sub>(h))' +
+    ' &nbsp;&nbsp; a<sub>tj</sub> = softmax<sub>j</sub>( q<sub>t</sub>·k<sub>j</sub> / √' + dh + ' )</div>';
+  html += '<div class="formula" style="margin-top:6px"><span class="op">' + (st.masked[t]
+    ? 'Token ' + t + ' is hidden: everything it ends up knowing about its 8 samples comes from the tokens it attends to.'
+    : 'Token ' + t + ' is visible. Hidden tokens read from tokens like this one.') + '</span></div>';
+  html += '<h4>2 · Where token ' + t + ' looks (head ' + (head + 1) + ' of ' + H + ')</h4><div class="scrollx"><table class="mtab"><thead><tr><th>token j</th>' +
+    '<th>score</th><th>weight a<sub>tj</sub></th><th>value v<sub>j</sub>[' + (ch + 1) + ']</th><th>product</th></tr></thead><tbody>';
+  let osum = 0;
+  for (let j = 0; j < T; j++) {
+    const a = tr.A[(head * T + t) * T + j], s = tr.S[(head * T + t) * T + j], v = tr.V[j * d + ch];
+    osum += a * v;
+    html += '<tr' + (j === t ? ' style="background:#eef4fd"' : '') + '><td class="ch">' + j + (st.masked[j] ? ' <span style="color:#e0342b">hidden</span>' : '') +
+      (j === t ? ' ← itself' : '') + '</td><td>' + n3(s) + '</td><td class="sum">' + n3(a) + '</td><td>' + n3(v) + '</td><td>' + n4(a * v) + '</td></tr>';
+  }
+  html += '</tbody></table></div>';
+  const at_ = t * d + ch, drawn = st.snapshot[ch * T + t];
+  html += '<div class="formula" style="margin-top:8px">o<sub>t</sub>[' + (ch + 1) + '] = Σ a·v = ' + n4(osum) + ' &nbsp;→ W<sub>o</sub>, + x, FFN, + h &nbsp;→ y = <span class="res">' +
+    n4(tr.out[at_]) + '</span>  <span class="op">check: the box holds ' + n4(drawn) +
+    (Math.abs(drawn - tr.out[at_]) < 1e-4 && Math.abs(osum - tr.O[at_]) < 1e-4 ? ' ✓ matches' : ' ⚠ mismatch') + '</span></div>';
+  return { flow, title: 'Encoder ' + sel.stage + ' · dimension ' + (ch + 1) + ' · ' + tokLabel(t) + (st.masked[t] ? ' · hidden' : ''), html, tMax: T - 1, tLabel: tokLabel(t) };
+}
+
+function maeOutputMath() {
+  const t = clampT(WIN - 1), x = state.probe, d = model.d, p = Math.floor(t / TF_PATCH), j = t % TF_PATCH;
+  const n = model.N.subarray(p * d, (p + 1) * d), w = model.head.W.subarray(j * d, (j + 1) * d), b = model.head.b[j];
+  let z = b;
+  for (let i = 0; i < d; i++) z += w[i] * n[i];
+  const det = { x: n, w, b, z, a: z, nin: d };
+  const name = (i) => 'tok[' + p + '][' + (i + 1) + ']';
+  const flow = Flow.dense(det, { li: 1, ch: t, t: null, act: 'linear', actName: 'linear', actExpr: ACTS.linear.expr(z), name });
+  let html = '<h4>1 · Sample ' + t + ' = slot ' + j + ' of patch ' + p + '</h4><div class="formula">x̂[' + t + '] = Σ W<sub>head</sub>[' + j + '][i] · LN(token ' + p +
+    ')[i] + b <span class="op">— the pass shown hides patch ' + p + ' (and every fourth patch with it), so this is a prediction, not a copy</span></div>' + denseTable(det, name);
+  html += '<div class="formula" style="margin-top:8px">x̂[' + t + '] = <span class="res">' + n4(z) + '</span>  against x[' + t + '] = ' + n4(x[t]) + '  → error² ' +
+    n4((z - x[t]) ** 2) + '  <span class="op">check: ' + (Math.abs(z - recon[t]) < 1e-4 ? '✓ matches' : '⚠ mismatch') + '</span></div>';
+  return { flow, title: 'Output · sample ' + t + ' · predicted from patch ' + p + ' hidden', html, tMax: WIN - 1, tLabel: 't = ' + t };
+}
+
+/* ------------------------------------------------------- generation */
+/** How much of a window's energy a 50 Hz sine explains: 1 for a clean sine. */
+function sineShare(x) {
+  let a = 0, b = 0, e = 0;
+  for (let t = 0; t < x.length; t++) {
+    const ph = 2 * Math.PI * F0 * t / SR;
+    a += x[t] * Math.sin(ph); b += x[t] * Math.cos(ph); e += x[t] * x[t];
+  }
+  a *= 2 / x.length; b *= 2 / x.length;
+  return { share: Math.min(1, (a * a + b * b) * x.length / 2 / Math.max(1e-12, e)), amp: Math.hypot(a, b) };
+}
+
+/** Decodes codes drawn from N(0, 1): what a VAE is trained to make work. */
+function generate() {
+  if (!model.decode) return;
+  const cv = $('gen'), w = cv.clientWidth || 260, h = 120;
+  const ctx = dpiSetup(cv, w, h);
+  ctx.clearRect(0, 0, w, h);
+  const outs = [];
+  for (let n = 0; n < 4; n++) {
+    const z = new Float32Array(state.k);
+    for (let i = 0; i < state.k; i++) z[i] = randn();
+    outs.push(Float32Array.from(model.decode(z)));
+  }
+  let m = 1e-6;
+  outs.forEach((y) => { m = Math.max(m, maxAbs(y, 0, WIN)); });
+  const cw = w / 2, ch = h / 2;
+  outs.forEach((y, n) => {
+    const x0 = (n % 2) * cw, y0 = Math.floor(n / 2) * ch;
+    ctx.strokeStyle = '#eef1f4'; ctx.strokeRect(x0 + 2.5, y0 + 2.5, cw - 5, ch - 5);
+    drawWave(ctx, x0 + 5, y0 + 5, cw - 10, ch - 10, y, 0, WIN, m);
+  });
+  // a larger sample for the numbers
+  let share = 0, amp = 0;
+  const N = 64;
+  for (let n = 0; n < N; n++) {
+    const z = new Float32Array(state.k);
+    for (let i = 0; i < state.k; i++) z[i] = randn();
+    const s = sineShare(model.decode(z));
+    share += s.share / N; amp += s.amp / N;
+  }
+  let codeSd = '';
+  if (lastEval) {
+    const k = state.k, cs = lastEval.codes, sd = [];
+    for (let i = 0; i < k; i++) {
+      let mu = 0, v = 0;
+      cs.forEach((c) => { mu += c[i] / cs.length; });
+      cs.forEach((c) => { v += (c[i] - mu) ** 2 / cs.length; });
+      sd.push(Math.sqrt(v));
+    }
+    codeSd = ' The codes of the test windows have a spread (sd) of ' + sd.slice(0, 4).map((v) => v.toFixed(2)).join(', ') + (k > 4 ? ', …' : '') + '.';
+  }
+  $('genText').innerHTML = (state.vae ? '<b>VAE</b>, β = ' + state.beta : '<b>Plain autoencoder</b> — nothing made N(0, 1) mean anything to it') +
+    '. Over 64 random codes, a 50 Hz sine explains <b>' + (share * 100).toFixed(0) + '%</b> of the energy on average (a clean window: over 99%), ' +
+    'mean amplitude ' + amp.toFixed(2) + ' (clean mains: 1).' + codeSd;
 }
 
 function denseStageMath(st, sel) {
@@ -521,7 +769,9 @@ function outputMath() {
   } else {
     const c = aeConvTerms(model.outStep.conv, model.outInput, WIN, 0, t);
     flow = Flow.conv(c, { t, li: model.stages.length, ch: 0, a: c.z, act: 'linear', actName: 'linear', actExpr: ACTS.linear.expr(c.z) });
-    html = '<div class="formula"><span class="op">The last map was upsampled to 128 positions; one linear convolution turns its channels into the signal.</span></div>' +
+    html = '<div class="formula"><span class="op">' + (state.kind === 'lstm'
+      ? 'A linear readout — the same ' + state.units + ' weights at every step — turns the decoder state at step ' + t + ' into the sample.'
+      : 'The last map was upsampled to 128 positions; one linear convolution turns its channels into the signal.') + '</span></div>' +
       convHtml(c, 'linear', c.z) + '<div class="formula" style="margin-top:6px">x̂[' + t + '] = ' + n4(c.z) + ' against x[' + t + '] = ' + n4(x[t]) +
       '  <span class="op">check: ' + (Math.abs(c.z - recon[t]) < 1e-4 ? '✓ matches' : '⚠ mismatch') + '</span></div>';
   }
@@ -539,11 +789,7 @@ function runSweep() {
   let ki = 0, m = null;
   job = { name: 'sweep' };
   const stepJob = () => {
-    if (!m) {
-      const base = { k: SWEEP_K[ki], vae: state.vae, beta: state.beta };
-      m = state.kind === 'conv' ? new ConvAE({ ...base, filters: state.filters }) : new MLPAE({ ...base, hidden: state.hidden });
-      m.ep = 0;
-    }
+    if (!m) { m = makeModel(SWEEP_K[ki]); m.ep = 0; }
     const t0 = performance.now();
     while (m.ep < epochs && performance.now() - t0 < 40) {
       const B = state.batch, ins = [], tgs = [];
@@ -644,7 +890,7 @@ function bindUI() {
   $('btnStep').onclick = () => {
     const target = state.epoch + 1;
     while (state.epoch < target) trainOneBatch();
-    evaluate(); renderMetrics(); renderNet();
+    evaluate(); renderMetrics(); renderNet(); generate();
   };
   $('btnReset').onclick = () => { setRunning(false); state.stopAt = null; renderRunTarget(); rebuild(); };
 
@@ -656,6 +902,13 @@ function bindUI() {
   sel('codeK', 'k', true);
   sel('hidden', 'hidden', true);
   sel('filters', 'filters', true);
+  sel('cell', 'cell', false);
+  sel('units', 'units', true);
+  sel('maeLayers', 'maeLayers', true);
+  sel('maskRatio', 'maskRatio', true);
+  sel('beta', 'beta', true);
+  $('vae').onchange = (e) => { state.vae = e.target.checked; rebuild(); };
+  $('btnGen').onclick = generate;
   sel('trainOn', 'trainOn', false, () => { regenData(); rebuild(); });
   sel('dnNoise', 'dnNoise', true, () => { evaluate(); renderMetrics(); });
   sel('mode', 'mode', false, () => renderNet());
@@ -704,10 +957,11 @@ function bindUI() {
     const nd = hit.nd, f = Math.min(1, Math.max(0, (mx - nd.x - 4) / (nd.w - 8)));
     if (hit.type === 'node') {
       const st = model.stages[hit.stage];
-      if (st.kind === 'units') {
+      if (st.kind === 'units' || st.kind === 'seq') {
         const rowH = (nd.h - 12) / st.C;
         hit.ch = Math.max(0, Math.min(st.C - 1, Math.floor((my - nd.y - 6) / rowH)));
-        if (st.part === 'enc') state.tPos = 64;
+        if (st.kind === 'seq') state.tPos = Math.max(0, Math.min(st.L - 1, Math.floor(f * st.L)));
+        else if (st.part === 'enc') state.tPos = 64;
       } else if (st.L) state.tPos = Math.round(f * (st.L - 1));
     } else state.tPos = Math.round(f * (WIN - 1));
     state.selected = { type: hit.type, stage: hit.stage, ch: hit.ch };
@@ -735,6 +989,7 @@ function init() {
   renderMetrics();
   renderNet();
   renderMath(true);
+  generate();
   requestAnimationFrame(loop);
 }
 

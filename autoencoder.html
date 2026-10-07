@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Autoencoder Playground — power-line disturbances</title>
-<link rel="stylesheet" href="css/style.css?v=27">
+<link rel="stylesheet" href="css/style.css?v=30">
 </head>
 <body class="ae ae-mlp">
 
@@ -23,6 +23,8 @@
   <nav class="archsw" role="tablist">
     <button data-kind="mlp" class="on" role="tab">MLP AE</button>
     <button data-kind="conv" role="tab">Conv AE</button>
+    <button data-kind="lstm" role="tab">LSTM AE</button>
+    <button data-kind="mae" role="tab">Transformer MAE</button>
   </nav>
   <div class="epochbox">
     <span class="lbl">Epoch</span>
@@ -58,7 +60,7 @@
     <select id="batch"><option>4</option><option>8</option><option selected>16</option><option>32</option></select>
   </label>
 
-  <label class="ctl"><span>Code size k</span>
+  <label class="ctl ae-notmae"><span>Code size k</span>
     <select id="codeK" title="How many numbers the bottleneck keeps of the 128">
       <option>1</option><option selected>2</option><option>3</option><option>4</option>
       <option>8</option><option>16</option>
@@ -71,6 +73,32 @@
 
   <label class="ctl ae-convonly"><span>Filters</span>
     <select id="filters"><option>2</option><option selected>4</option><option>8</option></select>
+  </label>
+
+  <label class="ctl ae-lstmonly"><span>Cell</span>
+    <select id="cell"><option value="lstm" selected>LSTM</option><option value="gru">GRU</option></select>
+  </label>
+
+  <label class="ctl ae-lstmonly"><span>Units</span>
+    <select id="units"><option>8</option><option selected>16</option><option>32</option></select>
+  </label>
+
+  <label class="ctl ae-maeonly"><span>Encoder layers</span>
+    <select id="maeLayers"><option>1</option><option selected>2</option><option>3</option></select>
+  </label>
+
+  <label class="ctl ae-maeonly"><span>Masked in training</span>
+    <select id="maskRatio" title="Share of the 16 patches hidden in every training window">
+      <option value="0.25">25%</option><option value="0.5" selected>50%</option><option value="0.75">75%</option>
+    </select>
+  </label>
+
+  <label class="ctl inline ae-notmae" style="align-self:flex-end;padding-bottom:6px"
+         title="Variational: the code is sampled around a mean, and a KL term pulls the codes towards N(0, 1)">
+    <input type="checkbox" id="vae"> VAE
+  </label>
+  <label class="ctl ae-notmae"><span>KL weight β</span>
+    <select id="beta"><option>0.001</option><option selected>0.003</option><option>0.01</option><option>0.03</option></select>
   </label>
 
   <label class="ctl"><span>Train on</span>
@@ -152,6 +180,15 @@
       repeating every value (upsampling) before each convolution. Every box is one channel's map. The output box
       shows the reconstruction (blue) over the input (grey) and the squared error underneath. <b>Click</b> a box for
       its arithmetic.</p>
+    <p class="hint ae-lstmonly">The encoder reads the 128 samples one at a time; only its <b>last</b> state goes into the
+      code. The decoder gets the same k numbers at every step and has to unroll the window from them; a linear readout
+      turns its state into the sample. Each box holds a whole layer: a row per unit, a column per step, orange positive,
+      blue negative. <b>Click</b> a row at a step for the cell's gates at that moment.</p>
+    <p class="hint ae-maeonly">No bottleneck here: the window is cut into 16 patches of 8 samples, some patches are
+      replaced by a learned [MASK] vector (hatched), and the Transformer fills them in from the rest. Each box is a
+      row per dimension, a column per token; the squares above are the attention maps. To score a window it runs four
+      times, hiding every fourth patch each time, so every patch is predicted once without being seen. <b>Click</b> a
+      token for its arithmetic, or a sample of the output to see the pass that hides its patch.</p>
   </section>
 
   <div class="gutter" data-side="right" role="separator" aria-orientation="vertical" tabindex="0"
@@ -178,6 +215,14 @@
     <h3>Latent space</h3>
     <canvas id="latent" class="chart"></canvas>
 
+    <div class="ae-notmae">
+      <h3>Generate</h3>
+      <div class="probe"><button id="btnGen">Decode 4 random codes</button></div>
+      <canvas id="gen" class="chart" style="margin-top:6px"></canvas>
+      <p id="genText" class="hint small">Draws z from N(0, 1) and runs the decoder alone. A VAE is trained to make that
+        work; a plain autoencoder never was.</p>
+    </div>
+
     <h3>Inspector</h3>
     <div class="probe">
       <select id="probeClass"></select>
@@ -200,7 +245,7 @@
   <div id="mathBody" class="mathbody"></div>
 </section>
 
-<section class="oodpanel" id="sweepPanel">
+<section class="oodpanel ae-notmae" id="sweepPanel">
   <h2>Experiment · how many numbers does a window need?</h2>
   <p class="hint">Trains a fresh autoencoder of the current kind for every code size k = 1, 2, 3, 4, 8, 16 and measures
     how well it rebuilds clean mains and how well its error separates the disturbances. A clean 50 Hz window is
@@ -237,19 +282,33 @@
     <li>Tick <i>denoising</i> with k = 8: the network gets a noisier copy and must return the clean signal. At an added
       noise of 0.1 the MLP raised the SNR from 16.5 to 26.6 dB — better than a 5-point moving average (23.0 dB). The
       convolutional autoencoder reached 22.2 dB, no better than the simple filter.</li>
+    <li><b>LSTM AE</b> — the same job, one sample at a time: the encoder has to carry amplitude and phase through 128
+      steps, and the decoder has to unroll a 50 Hz cycle from a constant input. It is slower (about 0.6 s per epoch
+      against 0.02 s for the MLP) and less steady: after 40 epochs four runs gave a mean AUC of 0.81–0.95, a GRU 0.93.
+      Watch the clean error — runs that stayed above about 0.009 stayed below 0.9 AUC. One run of 100 epochs passed
+      0.99 on the way (0.96 at the end).</li>
+    <li><b>Transformer MAE</b> has no bottleneck at all: it fills in hidden patches from the visible ones. Because each
+      patch is predicted from its neighbours, its error sits right on the disturbance — 94–100% of the windows, the
+      best of the four. After 40 epochs (50% masked) three runs gave 0.82–0.97, after 100 epochs 0.94–0.97.
+      Hiding 75% of the patches in training is too much (0.71); 25% worked as well as 50%.</li>
+    <li>Tick <b>VAE</b> with k = 8 and press <i>Decode 4 random codes</i>. A plain autoencoder never learned what a
+      random code means: only 38% (MLP) or 41% (conv) of the energy of what it decodes is a 50 Hz sine. With the
+      VAE (β = 0.01) it is 98% and 93% — every random code gives a mains-like window. The price is detection: the
+      mean AUC fell from 0.99 to 0.91 (MLP) and from 0.98 to 0.89 (conv). At k = 2 even the plain MLP decodes
+      sines (99%): with two numbers there is nowhere else for the decoder to go.</li>
   </ul>
 </footer>
 
-<script src="js/signal.js?v=27"></script>
-<script src="js/fft.js?v=27"></script>
-<script src="js/nn.js?v=27"></script>
-<script src="js/rnn.js?v=27"></script>
-<script src="js/viz.js?v=27"></script>
-<script src="js/transformer.js?v=27"></script>
-<script src="js/flow.js?v=27"></script>
-<script src="js/ae-models.js?v=27"></script>
-<script src="js/ae-viz.js?v=27"></script>
-<script src="js/ui.js?v=27"></script>
-<script src="js/ae-main.js?v=27"></script>
+<script src="js/signal.js?v=30"></script>
+<script src="js/fft.js?v=30"></script>
+<script src="js/nn.js?v=30"></script>
+<script src="js/rnn.js?v=30"></script>
+<script src="js/viz.js?v=30"></script>
+<script src="js/transformer.js?v=30"></script>
+<script src="js/flow.js?v=30"></script>
+<script src="js/ae-models.js?v=30"></script>
+<script src="js/ae-viz.js?v=30"></script>
+<script src="js/ui.js?v=30"></script>
+<script src="js/ae-main.js?v=30"></script>
 </body>
 </html>

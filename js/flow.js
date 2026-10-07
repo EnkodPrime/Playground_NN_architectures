@@ -997,7 +997,7 @@ const Flow = (() => {
     s += txt(300, 146, d.encLabel, { size: 10, color: MUTED });
     s += wire([[361, 108], [392, 108]]);
     s += vecBars(396, 83, Math.max(40, Math.min(120, d.code.length * 14)), 50, d.code, -1,
-      'code z · k = ' + d.code.length + (d.vae ? ' (μ)' : ''), 'the bottleneck: everything the decoder gets about this window');
+      d.codeLabel || 'code z · k = ' + d.code.length + (d.vae ? ' (μ)' : ''), d.codeTip || 'the bottleneck: everything the decoder gets about this window');
     const cx = 396 + Math.max(40, Math.min(120, d.code.length * 14));
     s += wire([[cx + 2, 108], [cx + 34, 108]]);
     s += gate(cx + 96, 108, 'decoder', '', { w: 120, tip: d.decTip });
@@ -1024,6 +1024,25 @@ const Flow = (() => {
     s += pill(ox + 110, 230, 'x̂', d.y[T], { tip: 'reconstruction at the marked position' });
     s += pill(ox - 70, 190, 'MSE', d.mse, { d: 5, tip: 'mean of the squared error over the window — the anomaly score' });
     return svg(ox + 240, 250, s, 'The autoencoder on this window: the score is how badly it rebuilds it.');
+  }
+
+  /**
+   * A hidden patch of the masked autoencoder: the learned [MASK] vector plus the position.
+   * @param d { mtok[], m, pos, out, start }
+   * @param o { t, ch }
+   */
+  function maeMask(d, o) {
+    let s = '';
+    s += txt(40, 30, 'patch ' + o.t + ' is hidden: the encoder gets the learned [MASK] vector instead of samples ' + d.start + '–' + (d.start + 7),
+      { size: 11, color: MUTED, anchor: 'start' });
+    s += vecBars(40, 62, 160, 56, d.mtok, o.ch, '[MASK] token (learned)', 'one vector, the same for every hidden patch');
+    s += wire([[202, 90], [266, 90]]);
+    s += op(280, 90, '+', { tip: '[MASK][' + (o.ch + 1) + '] + pos[' + o.t + '][' + (o.ch + 1) + '] = ' + num(d.m, 4) + ' + ' + num(d.pos, 4) + ' = ' + num(d.out, 4) });
+    s += pill(280, 152, 'pos', d.pos, { tip: 'the learned position vector of token ' + o.t + ' — all that tells the hidden patches apart' });
+    s += wire([[280, 138], [280, 104]]);
+    s += wire([[294, 90], [356, 90]]);
+    s += pill(400, 90, 'token', d.out, { tip: 'dimension ' + (o.ch + 1) + ' of token ' + o.t });
+    return svg(480, 180, s, 'A hidden patch: the [MASK] vector plus the position of the patch.');
   }
 
   /* ------------------------------------------------------ state space */
@@ -1228,5 +1247,5 @@ const Flow = (() => {
       (o.trueIdx >= 0 ? ' The true class is in bold.' : ''));
   }
 
-  return { lstm, gru, rnn, conv, ssm, gnn, output, dense, kan, resblock, inception, tfEmbed, tfConvEmbed, attention, aePipeline, spark };
+  return { lstm, gru, rnn, conv, ssm, gnn, output, dense, kan, resblock, inception, tfEmbed, tfConvEmbed, attention, aePipeline, maeMask, spark };
 })();
