@@ -205,6 +205,13 @@ function rnnLinkStrength(stage, unit, ci) {
 function stageLink(model, li, co, ci) {
   const st = model.stages[li];
   if (st.conv) return linkStrength(st.conv, co, ci);
+  if (st.ccnn && st.cc.kernel) {
+    // the kernel this pair of channels got from the kernel network
+    const l = st.cc, K = l.K, o = (co * l.cin + ci) * K;
+    let sum = 0, signed = 0;
+    for (let q = 0; q < K; q++) { sum += Math.abs(l.kernel[o + q]); signed += l.kernel[o + q]; }
+    return { mag: sum / K, sign: signed >= 0 ? 1 : -1 };
+  }
   if (st.tfembed) {
     // the tokenizer: one filter (conv) or one row of weights (linear) per dimension
     if (model.tconv) return linkStrength(model.tconv, co, 0);
@@ -284,7 +291,7 @@ function stageLink(model, li, co, ci) {
 function stageInputCount(model, li) {
   const st = model.stages[li];
   if (st.conv) return st.conv.cin;
-  if (st.mlp || st.kan || st.resblock || st.inception || st.tfembed || st.tflayer) return li === 0 ? 1 : model.stages[li - 1].C;
+  if (st.mlp || st.kan || st.resblock || st.inception || st.tfembed || st.tflayer || st.ccnn) return li === 0 ? 1 : model.stages[li - 1].C;
   if (st.ssm || st.gnn) return st.layer.D;
   return st.layer.fwd.D;
 }
@@ -371,6 +378,9 @@ function drawNetwork(ctx, o) {
       ? (narrow
         ? 'L' + (li + 1) + ' K' + st.conv.k + (st.res ? ' res' : '') + (st.pooled ? ' ↓' : '')
         : 'LAYER ' + (li + 1) + ' · K=' + st.conv.k + (st.res ? ' · res' : '') + (st.pooled ? ' · pool' : ''))
+      : st.ccnn
+        ? (narrow ? 'C' + (li + 1) + ' ' + st.cc.effectiveTaps() + 't'
+          : 'LAYER ' + (li + 1) + ' · CKConv · ' + st.cc.effectiveTaps() + ' of ' + (2 * st.cc.R + 1) + ' taps')
       : st.tfembed
         ? (narrow ? 'TOKENS' : model.tconv ? 'TOKENS · conv K=' + model.tconv.k + ' · max/8' : 'EMBED · ' + model.T + ' tokens × ' + model.d)
       : st.tflayer
@@ -407,7 +417,20 @@ function drawNetwork(ctx, o) {
           drawWave(ctx, nd.x + 4, nd.y + 4, nd.w - 8, nd.h - 8, snap, c * st.L, st.L, scale);
         }
       }
-      if (st.inception) {
+      if (st.ccnn && st.cc.kernel) {
+        // the continuous kernel from input channel 1, and the mask that limits its reach
+        const l = st.cc, K = l.K, o = (c * l.cin) * K, gw = Math.min(46, nd.w - 10), gh = 14;
+        let m = 1e-9;
+        for (let q = 0; q < K; q++) m = Math.max(m, Math.abs(l.kernel[o + q]));
+        ctx.fillStyle = 'rgba(255,255,255,0.88)';
+        ctx.fillRect(nd.x + 3, nd.y + 2, gw + 4, gh + 2);
+        ctx.beginPath();
+        for (let q = 0; q < K; q++) {
+          const X = nd.x + 5 + q / (K - 1) * gw, Y = nd.y + 3 + gh / 2 - l.kernel[o + q] / m * (gh / 2 - 1);
+          if (q === 0) ctx.moveTo(X, Y); else ctx.lineTo(X, Y);
+        }
+        ctx.strokeStyle = '#2b6cb0'; ctx.lineWidth = 1; ctx.stroke();
+      } else if (st.inception) {
         // which branch this channel comes from
         const { bi } = st.module.branchOf(c);
         const name = bi < st.module.kernels.length ? 'K' + st.module.kernels[bi] : 'pool';
@@ -572,6 +595,14 @@ function drawSelectionOverlay(ctx, o) {
       span(prevCol.nodes[0], 5, WIN, tPos, tPos, 'rgba(29,78,216,0.55)');
       span(cols[1].nodes[sel.ch], 4, WIN, tPos, tPos, 'rgba(29,78,216,0.55)');
     }
+    return;
+  }
+  if (st.ccnn) {
+    // the whole span the kernel could cover, and the part the learned mask keeps
+    const l = st.cc, half = (l.effectiveTaps() - 1) / 2;
+    prevCol.nodes.forEach((nd) => span(nd, inner, prevLen, tPos - l.R, tPos + l.R, 'rgba(29,78,216,0.08)'));
+    prevCol.nodes.forEach((nd) => span(nd, inner, prevLen, tPos - half, tPos + half, 'rgba(29,78,216,0.16)'));
+    span(cols[sel.layer + 1].nodes[sel.ch], 4, st.L, tPos, tPos, 'rgba(29,78,216,0.55)');
     return;
   }
   if (st.tfembed) {

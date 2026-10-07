@@ -4,19 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NN Architecture Playground — power-line disturbances</title>
-<meta name="description" content="Interactive neural network playground for time series in the browser: MLP, 1D CNN, ResNet-1D, InceptionTime, RNN / GRU / LSTM, S4 / Mamba, GNN, Transformer and KAN learn to classify power-line disturbances, with every weight, activation and calculation shown. No libraries, no install.">
+<meta name="description" content="Interactive neural network playground for time series in the browser: MLP, 1D CNN, continuous CNN, ResNet-1D, InceptionTime, RNN / GRU / LSTM, S4 / Mamba, GNN, Transformer and KAN learn to classify power-line disturbances, with every weight, activation and calculation shown. No libraries, no install.">
 <meta name="author" content="EnkodPrime">
 <link rel="canonical" href="https://enkodprime.github.io/Playground_NN_architectures/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Enkod">
 <meta property="og:title" content="NN Architecture Playground — power-line disturbances">
-<meta property="og:description" content="Interactive neural network playground for time series in the browser: MLP, 1D CNN, ResNet-1D, InceptionTime, RNN / GRU / LSTM, S4 / Mamba, GNN, Transformer and KAN learn to classify power-line disturbances, with every weight, activation and calculation shown. No libraries, no install.">
+<meta property="og:description" content="Interactive neural network playground for time series in the browser: MLP, 1D CNN, continuous CNN, ResNet-1D, InceptionTime, RNN / GRU / LSTM, S4 / Mamba, GNN, Transformer and KAN learn to classify power-line disturbances, with every weight, activation and calculation shown. No libraries, no install.">
 <meta property="og:url" content="https://enkodprime.github.io/Playground_NN_architectures/">
 <meta property="og:image" content="https://enkodprime.github.io/Playground_NN_architectures/img/enkod-logo.png">
 <meta name="twitter:card" content="summary">
-<script type="application/ld+json">{"@context": "https://schema.org", "@type": "WebApplication", "name": "NN Architecture Playground", "description": "Interactive neural network playground for time series in the browser: MLP, 1D CNN, ResNet-1D, InceptionTime, RNN / GRU / LSTM, S4 / Mamba, GNN, Transformer and KAN learn to classify power-line disturbances, with every weight, activation and calculation shown. No libraries, no install.", "url": "https://enkodprime.github.io/Playground_NN_architectures/", "image": "https://enkodprime.github.io/Playground_NN_architectures/img/enkod-logo.png", "applicationCategory": "EducationalApplication", "operatingSystem": "Any (runs in a web browser)", "isAccessibleForFree": true, "inLanguage": "en", "author": {"@type": "Person", "name": "EnkodPrime", "url": "https://github.com/EnkodPrime"}, "sameAs": "https://github.com/EnkodPrime/Playground_NN_architectures"}</script>
+<script type="application/ld+json">{"@context": "https://schema.org", "@type": "WebApplication", "name": "NN Architecture Playground", "description": "Interactive neural network playground for time series in the browser: MLP, 1D CNN, continuous CNN, ResNet-1D, InceptionTime, RNN / GRU / LSTM, S4 / Mamba, GNN, Transformer and KAN learn to classify power-line disturbances, with every weight, activation and calculation shown. No libraries, no install.", "url": "https://enkodprime.github.io/Playground_NN_architectures/", "image": "https://enkodprime.github.io/Playground_NN_architectures/img/enkod-logo.png", "applicationCategory": "EducationalApplication", "operatingSystem": "Any (runs in a web browser)", "isAccessibleForFree": true, "inLanguage": "en", "author": {"@type": "Person", "name": "EnkodPrime", "url": "https://github.com/EnkodPrime"}, "sameAs": "https://github.com/EnkodPrime/Playground_NN_architectures"}</script>
 <link rel="icon" type="image/png" href="img/enkod-logo.png">
-<link rel="stylesheet" href="css/style.css?v=38">
+<link rel="stylesheet" href="css/style.css?v=43">
 </head>
 <body>
 
@@ -35,6 +35,7 @@
   <nav class="archsw" role="tablist">
     <button id="archMlp" role="tab">MLP</button>
     <button id="archCnn" class="on" role="tab">1D CNN</button>
+    <button id="archCc" role="tab">CCNN</button>
     <button id="archRes" role="tab">ResNet-1D</button>
     <button id="archInc" role="tab">InceptionTime</button>
     <button id="archRnn" role="tab">RNN</button>
@@ -108,6 +109,25 @@
   <label class="ctl cnnonly inline" style="align-self:flex-end;padding-bottom:6px">
     <input type="checkbox" id="causal"> causal (TCN)
   </label>
+
+  <label class="ctl ccnnonly"><span>Kernel span</span>
+    <select id="ccSpan">
+      <option value="16">±16 samples (±5 ms)</option>
+      <option value="32" selected>±32 samples (±10 ms)</option>
+      <option value="63">±63 samples (±20 ms)</option>
+    </select>
+  </label>
+
+  <label class="ctl ccnnonly inline" style="align-self:flex-end;padding-bottom:6px"
+         title="Learn a Gaussian mask on every layer's kernel — how far it reaches (FlexConv)">
+    <input type="checkbox" id="ccFlex" checked> FlexConv (learn the size)
+  </label>
+
+  <div class="ctl ccnnonly" style="align-self:flex-end">
+    <button id="ccRate" class="wide" style="padding:5px 10px;font-size:12px"
+            title="Evaluate the trained network on the test set resampled to 6.4 kHz">Test at 6.4 kHz</button>
+    <span id="ccRateOut" style="font-size:11px;color:var(--muted)"></span>
+  </div>
 
   <label class="ctl tfonly"><span>Tokens</span>
     <select id="tfTok">
@@ -261,6 +281,10 @@
       current example, and in the top-left corner the learned kernel itself. Link thickness is
       weight magnitude (<span class="sw pos"></span> positive, <span class="sw neg"></span>
       negative). Hover for a quick look, <b>click</b> a node for the full arithmetic below.</p>
+    <p class="hint ccnnonly">Each box is one channel's map, as in the 1D CNN — but every kernel is a continuous function of time,
+      drawn by a small network and sampled at the 3.2 kHz grid (the curve in the corner). A learned Gaussian mask decides how far
+      it reaches; the column label says how many taps still count. <b>Click</b> a channel to see the kernel network, the mask
+      and the convolution at t.</p>
     <p class="hint tfonly">The window is cut into 16 patches of 8 samples (2.5 ms); each becomes a token of d numbers —
       by default the largest response of d short filters in that patch (a convolutional tokenizer).
       Every box is one of those d dimensions across the 16 tokens. Above each encoder column is its attention map —
@@ -494,6 +518,29 @@
 </section>
 
 <footer class="notes">
+  <h3 class="ccnnonly">Things to try — CCNN</h3>
+  <ul class="ccnnonly">
+    <li><b>Change the sample rate.</b> Train 30 epochs on <i>4 classes</i>, then press <i>Test at 6.4 kHz</i>: the test set
+      is resampled to twice the rate and run twice — once with every kernel read on a grid twice as fine, once with the
+      same taps as before, which is all an ordinary convolution could do. In our runs the first kept its accuracy
+      (89% → 83%, 64% → 64%, 53% → 54%) and the second fell to near chance (42%, 28%, 27%). The kernel is a function of
+      time, not a list of taps.</li>
+    <li><b>A kernel is a curve.</b> Hover a channel: its kernels are drawn as continuous functions over ±10 ms, with the
+      mask dashed and the frequency response below. Click it to follow Δt through the kernel network, the mask, the
+      taps actually used and the convolution at t.</li>
+    <li><b>FlexConv learns the reach.</b> A Gaussian mask with a learned width σ decides how far each layer's kernel
+      looks; the column label says how many taps still count. In our runs layer 1 kept about 51–53 of 65 taps and
+      layer 2 widened to the whole span. Without the mask the same network reached 53% where it reached 64–89% with it.</li>
+    <li><b>Span.</b> After 15 epochs: ±16 samples 65%, ±32 samples 89%, ±63 samples 58% (one run each). ±32 — one
+      50 Hz cycle in all — is the default.</li>
+    <li><b>What it costs.</b> About 1,000 parameters, but every epoch takes some fifteen times as long as the 2×4 CNN's
+      (430 against 28 ms here): the kernels are long and generated afresh at every step. On four classes after 30 epochs
+      64–89% against 68% for the CNN; on all eight 39% against 38%.</li>
+    <li><b>Why the starting point matters.</b> The kernel network is a small SIREN: a sine layer whose frequency must grow
+      with the span, or it can only draw smooth, low-pass kernels that never see a 420–900 Hz ripple. Its output is also
+      rescaled on a few training windows before training (LSUV). Without these two the network stayed at 25%.</li>
+  </ul>
+
   <h3 class="tfonly">Things to try — Transformer</h3>
   <ul class="tfonly">
     <li><b>The tokens make the difference.</b> Switch <i>Tokens</i> between the two. With linear patches each
@@ -667,23 +714,24 @@
   </ul>
 </footer>
 
-<script src="js/signal.js?v=38"></script>
-<script src="js/fft.js?v=38"></script>
-<script src="js/nn.js?v=38"></script>
-<script src="js/rnn.js?v=38"></script>
-<script src="js/ssm.js?v=38"></script>
-<script src="js/gnn.js?v=38"></script>
-<script src="js/viz.js?v=38"></script>
-<script src="js/stream.js?v=38"></script>
-<script src="js/ood.js?v=38"></script>
-<script src="js/watermark.js?v=38"></script>
-<script src="js/mlp.js?v=38"></script>
-<script src="js/transformer.js?v=38"></script>
-<script src="js/blocks.js?v=38"></script>
-<script src="js/kan.js?v=38"></script>
-<script src="js/quant.js?v=38"></script>
-<script src="js/flow.js?v=38"></script>
-<script src="js/ui.js?v=38"></script>
-<script src="js/main.js?v=38"></script>
+<script src="js/signal.js?v=43"></script>
+<script src="js/fft.js?v=43"></script>
+<script src="js/nn.js?v=43"></script>
+<script src="js/rnn.js?v=43"></script>
+<script src="js/ssm.js?v=43"></script>
+<script src="js/gnn.js?v=43"></script>
+<script src="js/viz.js?v=43"></script>
+<script src="js/stream.js?v=43"></script>
+<script src="js/ood.js?v=43"></script>
+<script src="js/watermark.js?v=43"></script>
+<script src="js/mlp.js?v=43"></script>
+<script src="js/ccnn.js?v=43"></script>
+<script src="js/transformer.js?v=43"></script>
+<script src="js/blocks.js?v=43"></script>
+<script src="js/kan.js?v=43"></script>
+<script src="js/quant.js?v=43"></script>
+<script src="js/flow.js?v=43"></script>
+<script src="js/ui.js?v=43"></script>
+<script src="js/main.js?v=43"></script>
 </body>
 </html>

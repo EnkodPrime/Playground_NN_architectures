@@ -14,6 +14,9 @@ const state = {
   kanLayers: [{ units: 4 }, { units: 4 }],
   resLayers: [{ filters: 6, kernels: '8-5-3' }, { filters: 6, kernels: '8-5-3' }],
   incLayers: [{ filters: 2 }, { filters: 2 }],
+  ccLayers: [{ units: 4 }, { units: 4 }],   // continuous CNN layers
+  ccSpan: 32,                  // half span of the continuous kernels, in samples at 3.2 kHz
+  ccFlex: true,                // FlexConv: learn how far the kernel reaches
   tfLayers: [{}, {}],           // Transformer encoder layers
   tfD: 8,                      // Transformer width: numbers per token
   tfHeads: 2,
@@ -123,13 +126,14 @@ function archLayers() {
   if (state.arch === 'resnet') return state.resLayers;
   if (state.arch === 'inception') return state.incLayers;
   if (state.arch === 'transformer') return state.tfLayers;
+  if (state.arch === 'ccnn') return state.ccLayers;
   return state.arch === 'ssm' ? state.ssmLayers : state.gnnLayers;
 }
 
 /** Most layers each playground allows. */
 function maxLayers() {
   if (state.arch === 'cnn') return 8;
-  return ['mlp', 'kan', 'resnet', 'inception', 'transformer'].includes(state.arch) ? 3 : 2;
+  return ['mlp', 'kan', 'resnet', 'inception', 'transformer', 'ccnn'].includes(state.arch) ? 3 : 2;
 }
 
 function rebuildModel() {
@@ -165,6 +169,14 @@ function rebuildModel() {
       nClasses: activeClasses().length,
       inputLen: WIN,
     });
+  } else if (state.arch === 'ccnn') {
+    model = new CCNNNet({
+      layers: JSON.parse(JSON.stringify(state.ccLayers)),
+      span: state.ccSpan, flex: state.ccFlex, activation: state.activation,
+      nClasses: activeClasses().length,
+      inputLen: WIN,
+    });
+    if (train) model.calibrate(train.xs);
   } else if (state.arch === 'transformer') {
     model = new TransformerNet({
       layers: JSON.parse(JSON.stringify(state.tfLayers)),
@@ -223,7 +235,7 @@ function rebuildModel() {
 
 /** The tab button of every playground. */
 const ARCH_TABS = {
-  mlp: 'archMlp', cnn: 'archCnn', resnet: 'archRes', inception: 'archInc',
+  mlp: 'archMlp', cnn: 'archCnn', ccnn: 'archCc', resnet: 'archRes', inception: 'archInc',
   rnn: 'archRnn', ssm: 'archSsm', gnn: 'archGnn', transformer: 'archTf', kan: 'archKan',
 };
 
@@ -237,7 +249,7 @@ function setArch(arch) {
   $('layerLbl').textContent = {
     cnn: 'Convolutional layers', resnet: 'Residual blocks', inception: 'Inception modules', rnn: 'Recurrent layers',
     mlp: 'Hidden layers', kan: 'KAN layers', ssm: 'State space layers', gnn: 'Message passing layers',
-    transformer: 'Encoder layers',
+    transformer: 'Encoder layers', ccnn: 'Continuous conv layers',
   }[arch];
   setStream(false);
   ood.cal = null; ood.stats = null;
@@ -601,6 +613,40 @@ function drawInspector(probs, oodInfo) {
         'collapses the state coasts and the sample is ignored. That input dependence is the ' +
         'whole point of a selective SSM — and the reason it has no fixed kernel.';
     }
+    return;
+  }
+  if (h0 && h0.type === 'filter' && model.kind === 'ccnn') {
+    const st = model.stages[h0.layer], l = st.cc, K = l.K;
+    const show = Math.min(l.cin, 3);
+    title('KERNELS w(Δ) INTO CHANNEL ' + (h0.ch + 1) + (l.cin > 1 ? ' (' + show + ' of ' + l.cin + ' inputs)' : '') + ' · DASHED: MASK', 10);
+    if (l.kernel) {
+      let m = 1e-9;
+      for (let ci = 0; ci < show; ci++) for (let q = 0; q < K; q++) m = Math.max(m, Math.abs(l.kernel[(h0.ch * l.cin + ci) * K + q]));
+      ctx.strokeStyle = '#dfe4ea'; ctx.beginPath(); ctx.moveTo(0, 44); ctx.lineTo(w, 44); ctx.stroke();
+      if (l.flex) {
+        ctx.setLineDash([4, 3]); ctx.strokeStyle = '#98a2ad'; ctx.beginPath();
+        for (let q = 0; q < K; q++) { const X = q / (K - 1) * w, Y = 44 - l.mask[q] * 28; if (q === 0) ctx.moveTo(X, Y); else ctx.lineTo(X, Y); }
+        ctx.stroke(); ctx.setLineDash([]);
+      }
+      const colors = ['#2b6cb0', '#c2760f', '#2e9e5b'];
+      for (let ci = 0; ci < show; ci++) {
+        ctx.beginPath();
+        for (let q = 0; q < K; q++) { const X = q / (K - 1) * w, Y = 44 - l.kernel[(h0.ch * l.cin + ci) * K + q] / m * 28; if (q === 0) ctx.moveTo(X, Y); else ctx.lineTo(X, Y); }
+        ctx.strokeStyle = colors[ci]; ctx.lineWidth = 1.4; ctx.stroke();
+      }
+      title('FREQUENCY RESPONSE |H(f)| OF THE FIRST', 88);
+      const resp = kernelResponse(l.kernel, (h0.ch * l.cin) * K, K, 128);
+      drawSpectrum(ctx, 0, 92, w, 30, resp, maxOf(resp));
+      ctx.fillStyle = '#98a2ad'; ctx.font = '9px system-ui,sans-serif';
+      ctx.fillText('0', 0, 132); ctx.fillText('1600 Hz', w - 42, 132);
+    }
+    title('OUTPUT MAP FOR THIS EXAMPLE', 144);
+    if (st.snapshot) drawWave(ctx, 0, 148, w, 18, st.snapshot, h0.ch * st.L, st.L, maxAbs(st.snapshot, 0, st.snapshot.length));
+    const eff = l.effectiveTaps();
+    txt.innerHTML = '<b>Layer ' + (h0.layer + 1) + ', channel ' + (h0.ch + 1) + '</b> · continuous kernel over ±' + l.R + ' samples (±' +
+      (l.R / SR * 1000).toFixed(1) + ' ms)' + (l.flex ? ' · σ = ' + n3(l.sigma) + ' → ' + eff + ' taps (' + (eff / SR * 1000).toFixed(1) + ' ms) count' : '') +
+      '<br>The curve is a function of time drawn by a small network, sampled at the 3.2 kHz grid. At another sample rate the same ' +
+      'function is read on another grid — try <i>Test at 6.4 kHz</i>.';
     return;
   }
   if (h0 && h0.type === 'filter' && model.kind === 'transformer') {
@@ -1039,6 +1085,7 @@ function renderMathInner(host) {
     else if (model.kind === 'kan') renderKanMath(host, title, slider, sel);
     else if (model.kind === 'resnet') renderResBlockMath(host, title, slider, sel);
     else if (model.kind === 'transformer') renderTfMath(host, title, slider, sel);
+    else if (model.kind === 'ccnn') renderCCMath(host, title, slider, sel);
     else if (model.kind === 'inception') renderInceptionMath(host, title, slider, sel);
     else if (model.kind === 'gnn') renderGnnMath(host, title, slider, sel);
     else if (model.kind === 'ssm') renderSsmMath(host, title, slider, sel);
@@ -1413,6 +1460,77 @@ function rnnDownstreamHtml(li, unit, num) {
   }
   html += '</tbody></table></div>';
   return html;
+}
+
+/* ------------------------------------------------------- continuous CNN */
+function renderCCMath(host, title, slider, sel) {
+  const li = sel.layer, ch = sel.ch;
+  const st = model.stages[li];
+  if (!st || ch >= st.C || !st.cc.z) { state.selected = null; return renderMathInner(host); }
+  const l = st.cc, L = st.L, K = l.K, R = l.R;
+  const t = deepSlider(slider, L);
+  title.textContent = 'Layer ' + (li + 1) + ' · channel ' + (ch + 1) + ' · position t = ' + t;
+  const xin = li === 0 ? state.probe : model.stages[li - 1].snapshot;
+  // the input channel shown in the diagram: the one that contributes most at t
+  const chSums = [];
+  for (let ci = 0; ci < l.cin; ci++) {
+    let s = 0;
+    for (let q = 0; q < K; q++) {
+      const tt = t + q - l.Rr;
+      if (tt >= 0 && tt < L) s += l.kernel[(ch * l.cin + ci) * K + q] * xin[ci * L + tt];
+    }
+    chSums.push(s);
+  }
+  let ci = 0;
+  chSums.forEach((v, i) => { if (Math.abs(v) > Math.abs(chSums[ci])) ci = i; });
+  const o = (ch * l.cin + ci) * K;
+  const net = [], mask = [], w = [], xw = [];
+  for (let q = 0; q < K; q++) {
+    net.push(l.net[o + q]); mask.push(l.mask[q]); w.push(l.kernel[o + q]);
+    const tt = t + q - l.Rr;
+    xw.push(tt >= 0 && tt < L ? xin[ci * L + tt] : 0);
+  }
+  const sum = chSums.reduce((a, b) => a + b, 0), bias = l.bias.b[ch], z = sum + bias, a = applyAct(z);
+  setFlow(Flow.cconv({
+    net, mask, w, xw, R, sigma: l.sigma, flex: l.flex, eff: l.effectiveTaps(), ci, cin: l.cin, sum, bias, z, a,
+    actName: ACT_NAMES[state.activation], actExpr: actExpr(z), chSums,
+  }, { li, ch, t }));
+
+  let html = '<h4>1 · A kernel that is a function of time</h4>';
+  html += '<div class="formula">z[t] = Σ<sub>c</sub> Σ<sub>Δ=−' + R + '..' + R + '</sub> w<sub>' + (ch + 1) + ',c</sub>(Δ) · x<sub>c</sub>[t+Δ] + b' +
+    ' &nbsp;&nbsp; w(Δ) = KernelNet(u)' + (l.flex ? ' · exp(−½ (u/σ)²)' : '') + ', &nbsp; u = Δ / ' + R + '</div>';
+  html += '<div class="formula" style="margin-top:6px"><span class="op">KernelNet is ' + CC_HIDDEN + ' → ' + CC_HIDDEN +
+    ' sine units and a linear output with one value per channel pair — ' + (l.k1.W.length + l.k1.b.length + l.k2.W.length + l.k2.b.length +
+      l.k3.W.length + l.k3.b.length) + ' numbers that describe ' + (l.cout * l.cin) + ' kernels of ' + K + ' taps. ' +
+    (l.flex ? 'The mask width σ = ' + n3(l.sigma) + ' of the span is learned too (FlexConv): ' + l.effectiveTaps() + ' of ' + K +
+      ' taps are above 10 % of it.' : 'FlexConv is off, so the kernel fills the whole span.') + '</span></div>';
+
+  html += '<h4>2 · The kernel from input ' + (ci + 1) + ' to output ' + (ch + 1) + ', every 4th tap</h4>';
+  html += '<div class="scrollx"><table class="mtab"><thead><tr><th>Δ (samples)</th><th>Δ (ms)</th><th>u</th>' +
+    '<th>KernelNet</th><th>mask</th><th>w(Δ)</th><th>x[t+Δ]</th><th>w·x</th></tr></thead><tbody>';
+  for (let q = 0; q < K; q += 4) {
+    const D = q - l.Rr;
+    html += '<tr' + (D === 0 ? ' style="background:#eef4fd"' : '') + '><td class="ch">' + (D > 0 ? '+' : '') + D + '</td><td>' +
+      (D / SR * 1000).toFixed(2) + '</td><td>' + n3(D / l.Rr) + '</td><td>' + n3(net[q]) + '</td><td>' + n3(mask[q]) +
+      '</td><td style="color:' + wColor(w[q]) + '">' + n4(w[q]) + '</td><td>' + n3(xw[q]) + '</td><td class="sum">' + n4(w[q] * xw[q]) + '</td></tr>';
+  }
+  html += '</tbody></table></div>';
+
+  html += '<h4>3 · The convolution at t = ' + t + '</h4>';
+  if (l.cin > 1) {
+    html += '<div class="formula">' + chSums.map((v, i) => 'ch' + (i + 1) + ' ' + n3(v)).join('  +  ') + '</div>';
+  }
+  html += '<div class="formula" style="margin-top:6px">Σ = <b>' + n4(sum) + '</b>  +  b ' + n4(bias) + '  =  z <b>' + n4(z) + '</b>' +
+    '  <span class="op">→</span>  ' + actExpr(z) + '  =  <span class="res">' + n4(a) + '</span>  <span class="op">check: the map holds ' +
+    n4(st.snapshot[ch * L + t]) + (Math.abs(st.snapshot[ch * L + t] - a) < 1e-4 ? ' ✓ matches' : ' ⚠ mismatch') + '</span></div>';
+
+  if (li < model.stages.length - 1) {
+    html += '<h4>4 · Where this map goes</h4><div class="formula">It is input channel ' + (ch + 1) + ' of layer ' + (li + 2) +
+      ', whose kernel network draws a kernel from it to each of its ' + model.stages[li + 1].C + ' output channels.</div>';
+  } else {
+    html += deepDownstreamHtml(li, ch, 4);
+  }
+  host.innerHTML = html;
 }
 
 /* ------------------------------------------------------------ Transformer */
@@ -2345,7 +2463,7 @@ function renderInputMath(host, title, slider) {
 /** Human-readable name of whatever collapses the sequence before the linear layer. */
 function headName() {
   if (state.arch === 'mlp' || state.arch === 'kan') return 'the last hidden layer';
-  if (state.arch === 'resnet' || state.arch === 'inception') return 'Global Average Pool';
+  if (state.arch === 'resnet' || state.arch === 'inception' || state.arch === 'ccnn') return 'Global Average Pool';
   if (state.arch === 'transformer') return 'the mean over the ' + (model ? model.T : 16) + ' tokens';
   if (state.arch === 'rnn') {
     return state.readout === 'mean' ? 'the mean over time'
@@ -2494,7 +2612,7 @@ function buildLayerControls() {
     });
     return;
   }
-  if (state.arch === 'ssm' || state.arch === 'gnn' || state.arch === 'mlp' || state.arch === 'kan') {
+  if (['ssm', 'gnn', 'mlp', 'kan', 'ccnn'].includes(state.arch)) {
     const what = state.arch === 'mlp' ? 'units' : state.arch === 'kan' ? 'nodes' : 'channels';
     archLayers().forEach((ls) => {
       const card = document.createElement('div');
@@ -2816,7 +2934,7 @@ function renderWmPanel() {
       (model ? model.finalC : '—') + ' numbers per trigger — a linear head cannot memorise ' + wm.T +
       ' arbitrary label assignments. Measured: 8/20 matches with GAP against <b>20/20 with Flatten</b>. ' +
       'Switch the output head to <b>Flatten</b> to embed.</div>';
-  } else if (state.arch === 'resnet' || state.arch === 'inception' || state.arch === 'transformer') {
+  } else if (['resnet', 'inception', 'transformer', 'ccnn'].includes(state.arch)) {
     html += '<div class="verdict no" style="margin-top:8px">⚠ <b>This network ends in ' +
       (state.arch === 'transformer' ? 'an average over its tokens' : 'Global Average Pooling') + '</b>, leaving only ' + (model ? model.finalC : '—') + ' numbers per trigger — the same ' +
       'bottleneck that keeps the GAP head of the 1D CNN at 8/20 matches. Expect the verification to stay low.</div>';
@@ -2914,6 +3032,27 @@ function bindUI() {
   $('tfHeads').onchange = (e) => {
     state.tfHeads = +e.target.value; syncHeads();
     rebuildModel(); evaluate(); renderMetrics(); renderNet();
+  };
+  $('ccSpan').onchange = (e) => {
+    state.ccSpan = +e.target.value; rebuildModel(); evaluate(); renderMetrics(); renderNet();
+  };
+  $('ccFlex').onchange = (e) => {
+    state.ccFlex = e.target.checked; rebuildModel(); evaluate(); renderMetrics(); renderNet();
+  };
+  $('ccRate').onclick = () => {
+    // the trained network on the test set resampled to 6.4 kHz: the continuous kernels read on a
+    // grid twice as fine, against the same kernels read tap by tap as an ordinary convolution would
+    if (!model || model.kind !== 'ccnn') return;
+    const K = activeClasses().length;
+    const up = { xs: test.xs.map((x) => ccResample(x, 2)), ys: test.ys, n: test.n };
+    const base = model.evaluate(test, K).acc;
+    model.setRate(2);
+    const aware = model.evaluate(up, K).acc;
+    model.setRate(1);
+    const taps = model.evaluate(up, K).acc;
+    $('ccRateOut').innerHTML = '3.2 kHz <b>' + (base * 100).toFixed(1) + '%</b> · 6.4 kHz, kernels resampled <b>' +
+      (aware * 100).toFixed(1) + '%</b> · 6.4 kHz, same taps <b>' + (taps * 100).toFixed(1) + '%</b>';
+    renderNet();
   };
   $('tfTok').onchange = (e) => {
     state.tfTok = e.target.value; rebuildModel(); evaluate(); renderMetrics(); renderNet();

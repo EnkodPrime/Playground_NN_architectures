@@ -4,10 +4,11 @@ An interactive playground for neural network architectures on **signals**, in th
 [TensorFlow Playground](https://playground.tensorflow.org/) but for time series instead of 2D
 points. The task is recognising power-quality disturbances in 50 Hz mains voltage.
 
-Nine architectures share the same data, metrics and tooling, switchable at the top of the page:
+Ten architectures share the same data, metrics and tooling, switchable at the top of the page:
 
 * **MLP** — fully connected layers over the raw window, the baseline with no structure at all
 * **1D CNN** — convolutional filters over the window, optionally with residual skips
+* **CCNN** — a continuous convolutional network: kernels drawn by a small network as functions of time (CKConv / FlexConv)
 * **ResNet-1D** — residual blocks of three convolutions with normalisation (Wang et al. 2017)
 * **InceptionTime** — parallel convolutions of three lengths plus a pooling branch (Ismail Fawaz et al. 2020)
 * **RNN** — recurrent cells over the same window: simple tanh RNN, GRU or LSTM
@@ -94,6 +95,19 @@ response from the state modes.
 model is no longer time-invariant and has no fixed kernel; the inspector shows Δ(t) instead. The
 block also carries the short causal depthwise convolution and the SiLU gate branch of the original,
 without which a real-diagonal state is only a running average and cannot resolve a frequency.
+
+**CCNN.** 1–3 layers of continuous kernel convolutions (CKConv / FlexConv, Romero et al.; CCNN, Knigge et al.),
+1–10 channels each, then Global Average Pooling and a linear layer. A kernel is not stored tap by tap: a small
+network — two sine layers of 16 and a linear output, a SIREN — maps the time offset u = Δt / span to one weight
+per channel pair, and a Gaussian mask with a learned width σ (FlexConv) decides how far it reaches. The span is
+±16, ±32 or ±63 samples (±5, ±10, ±20 ms). Because the kernel is a function of time, the trained network can be
+run at another sample rate: *Test at 6.4 kHz* resamples the test set and reads every kernel on a grid twice as
+fine. In our runs that kept the accuracy (89% → 83%, 64% → 64%) where the same taps read as an ordinary
+convolution would fell to near chance (42%, 28%). Two details make it train at all: the first sine layer's
+frequency grows with the span, so a kernel can oscillate as fast as a 420–900 Hz ripple, and the output scale
+is set from a few training windows before training (LSUV, Mishkin & Matas 2016); without them it stayed at 25%.
+Gradients through the kernel network are gathered over the batch and pushed through it once per step. On four
+classes after 30 epochs it reached 64–89% against 68% for the 2×4 CNN, at about fifteen times the time per epoch.
 
 **ResNet-1D.** 1–3 residual blocks of 2–10 channels, the standard deep baseline for time series
 classification, scaled down: in every block conv → norm → ReLU for kernels 8, 5 and 3 (or 7-5-3,
@@ -300,6 +314,7 @@ Three panels below the autoencoder reuse whatever network is selected:
 | `js/kan.js` | Kolmogorov–Arnold layers: B-spline edges, running grid statistics |
 | `js/blocks.js` | ResNet-1D and InceptionTime: residual blocks, Inception modules, group normalisation |
 | `js/transformer.js` | patch embedding, multi-head self-attention (optionally causal), pre-LN encoder layers |
+| `js/ccnn.js` | continuous kernel convolution: SIREN kernel network, FlexConv mask, resampling to another rate |
 | `js/viz.js` | layout and canvas drawing |
 | `js/stream.js` | live generator, scope and decision ribbon |
 | `js/ood.js` | novelty scores, calibration, AUC, histograms |

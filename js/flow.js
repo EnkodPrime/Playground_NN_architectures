@@ -782,6 +782,79 @@ const Flow = (() => {
       d.branches.find((b) => b.sel).name + ' branch) at t = ' + o.t + '.');
   }
 
+  /* ------------------------------------------------------ continuous kernel */
+  /** A function of Δ drawn over the span: several curves, optional dots at the taps. */
+  function deltaPlot(x, y, w, h, curves, R, label) {
+    let m = 1e-9;
+    curves.forEach((c) => c.v.forEach((v) => { m = Math.max(m, Math.abs(c.scale ? v * c.scale : v)); }));
+    const n = curves[0].v.length;
+    const X = (q) => x + q / (n - 1) * w, Y = (v) => y + h / 2 - v / m * (h / 2 - 4);
+    let s = '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="5" fill="#fff" stroke="#c9d6e6"/>' +
+      '<line x1="' + x + '" x2="' + (x + w) + '" y1="' + (y + h / 2) + '" y2="' + (y + h / 2) + '" stroke="#dfe4ea"/>' +
+      '<line x1="' + (x + w / 2) + '" x2="' + (x + w / 2) + '" y1="' + y + '" y2="' + (y + h) + '" stroke="#e0342b" stroke-dasharray="2 3"/>';
+    curves.forEach((c) => {
+      s += '<path d="' + c.v.map((v, q) => (q ? 'L' : 'M') + X(q).toFixed(1) + ' ' + Y(c.scale ? v * c.scale : v).toFixed(1)).join(' ') +
+        '" fill="none" stroke="' + c.color + '" stroke-width="' + (c.width || 1.4) + '"' + (c.dash ? ' stroke-dasharray="4 3"' : '') + '/>';
+      if (c.dots) c.v.forEach((v, q) => { s += '<circle cx="' + X(q).toFixed(1) + '" cy="' + Y(v).toFixed(1) + '" r="1.4" fill="' + c.color + '"/>'; });
+    });
+    s += txt(x, y + h + 12, '−' + R, { size: 9, color: MUTED, mono: true, anchor: 'start' }) +
+      txt(x + w / 2, y + h + 12, 'Δ = 0 (t)', { size: 9, color: '#e0342b', mono: true }) +
+      txt(x + w, y + h + 12, '+' + R, { size: 9, color: MUTED, mono: true, anchor: 'end' });
+    if (label) s += txt(x, y - 7, label, { size: 10.5, color: MUTED, anchor: 'start' });
+    return s;
+  }
+
+  /**
+   * One continuous-kernel convolution output.
+   * @param d { net[K], mask[K], w[K], xw[K], R, sigma, flex, eff, ci, cin, sum, bias, z, a, actName, actExpr, chSums[] }
+   * @param o { li, ch, t }
+   */
+  function cconv(d, o) {
+    let s = '';
+    const PX = 330, PW = 560;
+    // kernel network → mask → kernel
+    s += pill(56, 86, 'Δt', 'ms', { tip: 'the time offset from t — a number, not a tap index' });
+    s += wire([[84, 86], [118, 86]]);
+    s += wbox(166, 86, 'KernelNet', { w: 92, h: 32, tip: 'two sine layers of ' + CC_HIDDEN + ' and a linear output: w(Δ) for every channel pair at any Δ' });
+    s += txt(166, 116, 'sin → sin → W₃', { size: 9.5, color: MUTED });
+    s += wire([[212, 86], [246, 86]]);
+    s += op(260, 86, 'mul', { tip: d.flex ? 'times the Gaussian mask exp(−½ (u/σ)²), σ = ' + num(d.sigma, 3) + ' of the span — FlexConv learns how far the kernel reaches'
+      : 'FlexConv is off: the kernel fills the whole span' });
+    s += txt(260, 116, d.flex ? 'mask σ=' + num(d.sigma, 2) : 'no mask', { size: 9.5, color: MUTED });
+    s += wire([[274, 86], [PX - 4, 86]]);
+    s += '<g class="blk">' + tip('kernel from input channel ' + (d.ci + 1) + ' to output channel ' + (o.ch + 1) +
+      '\nthin: KernelNet, dashed: mask, bold: the weight w(Δ) — ' + d.eff + ' of ' + (2 * d.R + 1) + ' taps above 10 % of the mask') +
+      deltaPlot(PX, 40, PW, 92, [
+        { v: d.net, color: '#9fbbe0', width: 1 },
+        { v: d.mask, color: '#98a2ad', dash: true, scale: Math.max(...d.net.map(Math.abs)) || 1 },
+        { v: d.w.map((v) => v * (d.wscale || 1)), color: BLUE, width: 2, dots: true },
+      ], d.R, 'w(Δ): output ' + (o.ch + 1) + ' ← input ' + (d.ci + 1) + ' — thin: KernelNet, dashed: mask, bold + dots: the taps used') + '</g>';
+    // the input around t, on the same Δ axis
+    s += txt(56, 196, d.cin > 1 ? 'input ch ' + (d.ci + 1) : 'signal', { size: 11, color: MUTED });
+    s += wire([[90, 196], [PX - 4, 196]]);
+    s += '<g class="blk">' + tip('the input around t; the products w(Δ)·x(t+Δ) over all taps and all ' + d.cin + ' input channels add up to ' + num(d.sum, 4)) +
+      deltaPlot(PX, 160, PW, 72, [{ v: d.xw, color: '#5b6873', width: 1.3 }], d.R, 'x(t+Δ) — the same span of the input') + '</g>';
+    // Σ → + b → act → out
+    const Y = 286;
+    s += wire([[PX + PW / 2, 246], [PX + PW / 2, Y - 14]]);
+    s += op(PX + PW / 2, Y, 'Σ', { tip: 'Σ over Δ and over the ' + d.cin + ' input channels = ' + num(d.sum, 4) +
+      (d.cin > 1 ? '\nper channel: ' + d.chSums.map((v, i) => 'ch' + (i + 1) + ' ' + num(v, 3)).join(', ') : '') });
+    let x = PX + PW / 2 + 14;
+    s += wire([[x, Y], [x + 50, Y]]);
+    x += 64;
+    s += wbox(x, Y - 50, 'b', { w: 40, tip: 'bias = ' + num(d.bias, 4) });
+    s += wire([[x, Y - 36], [x, Y - 14]]);
+    s += op(x, Y, '+', { tip: 'z = ' + num(d.sum, 4) + ' + ' + num(d.bias, 4) + ' = ' + num(d.z, 4) });
+    s += pill(x - 40, Y - 22, '', d.sum);
+    s += wire([[x + 14, Y], [x + 54, Y]]);
+    x += 92;
+    s += gate(x, Y, d.actName, d.a, { w: 72, tip: d.actExpr + '  →  ' + num(d.a, 4) });
+    s += wire([[x + 37, Y], [x + 80, Y]]);
+    s += pill(x + 58, Y - 22, '', d.a, { tip: 'the value drawn in this channel\'s map' });
+    s += txt(x + 86, Y + 5, 'out[' + o.t + ']', { size: 13, weight: 600, anchor: 'start' });
+    return svg(Math.max(940, x + 170), Y + 30, s, 'Continuous kernel convolution, layer ' + (o.li + 1) + ', channel ' + (o.ch + 1) + ' at t = ' + o.t + '.');
+  }
+
   /* ------------------------------------------------------ Transformer */
   /** A token's vector of d numbers as a small bar chart; dimension hi is outlined. */
   function vecBars(x, y, w, h, vals, hi, label, tipText) {
@@ -1247,5 +1320,5 @@ const Flow = (() => {
       (o.trueIdx >= 0 ? ' The true class is in bold.' : ''));
   }
 
-  return { lstm, gru, rnn, conv, ssm, gnn, output, dense, kan, resblock, inception, tfEmbed, tfConvEmbed, attention, aePipeline, maeMask, spark };
+  return { lstm, gru, rnn, conv, ssm, gnn, output, dense, kan, resblock, inception, tfEmbed, tfConvEmbed, attention, aePipeline, maeMask, spark, cconv };
 })();
