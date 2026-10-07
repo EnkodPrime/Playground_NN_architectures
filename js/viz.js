@@ -1,6 +1,7 @@
 /* viz.js — draws the network, signals, spectra and metrics onto canvases. */
 
 const POS = '#f0921f';   // positive values (orange, as in TF Playground)
+const INCEPTION_COLORS = ['#2b6cb0', '#2e9e5b', '#8e44ad', '#7b8794'];   // K short / mid / long / pool
 const NEG = '#0877bd';   // negative values (blue)
 const GRID = '#e3e6ea';
 const AXIS = '#b9c0c8';
@@ -160,8 +161,19 @@ function layoutNetwork(model, classes, cssW, oodOn) {
     col.nodes.forEach((nd) => { nd.x = col.x; nd.y = y; y += nd.h + NODE_VGAP; });
   });
   // residual skips are drawn as arcs under the columns
-  const skips = model.stages.some((st) => st.res);
+  const skips = model.stages.some((st) => skipArc(st, 0));
   return { cols, width: Math.max(cssW, totalW + 24), height: topPad + maxH + (skips ? 52 : 34) };
+}
+
+/**
+ * The skip that ends at stage li, if any: which column it starts from and
+ * whether it goes through a 1×1 convolution.
+ */
+function skipArc(st, li) {
+  if (st.res) return { from: li, proj: !!st.proj };
+  if (st.resblock && st.block.skip) return { from: li, proj: !!st.block.proj };
+  if (st.shortcut) return { from: 0, proj: true, label: 'shortcut' };
+  return null;
 }
 
 /** Strength of the link between input channel ci and filter co. */
@@ -191,6 +203,28 @@ function rnnLinkStrength(stage, unit, ci) {
 function stageLink(model, li, co, ci) {
   const st = model.stages[li];
   if (st.conv) return linkStrength(st.conv, co, ci);
+  if (st.resblock) {
+    // the block's first convolution reads input channel ci
+    return linkStrength(st.block.convs[0], co, ci);
+  }
+  if (st.inception) {
+    const m = st.module, { bi, j } = m.branchOf(co);
+    if (bi === m.kernels.length) {                 // pool branch: one 1×1 weight per input channel
+      const w = m.poolConv.W[j * m.cin + ci];
+      return { mag: Math.abs(w), sign: w >= 0 ? 1 : -1 };
+    }
+    const br = m.branches[bi];
+    if (!m.bott) return linkStrength(br, j, ci);
+    // through the bottleneck: how much of channel ci reaches this branch filter
+    let sum = 0, signed = 0;
+    for (let b = 0; b < m.B; b++) {
+      const wb = m.bott.W[b * m.cin + ci];
+      const k = linkStrength(br, j, b);
+      sum += Math.abs(wb) * k.mag;
+      signed += wb * k.sign;
+    }
+    return { mag: sum / m.B, sign: signed >= 0 ? 1 : -1 };
+  }
   if (st.mlp) {
     const d = st.dense;
     if (li === 0) {                       // the whole window arrives as one link
@@ -233,7 +267,7 @@ function stageLink(model, li, co, ci) {
 function stageInputCount(model, li) {
   const st = model.stages[li];
   if (st.conv) return st.conv.cin;
-  if (st.mlp || st.kan) return li === 0 ? 1 : model.stages[li - 1].C;
+  if (st.mlp || st.kan || st.resblock || st.inception) return li === 0 ? 1 : model.stages[li - 1].C;
   if (st.ssm || st.gnn) return st.layer.D;
   return st.layer.fwd.D;
 }
@@ -320,6 +354,11 @@ function drawNetwork(ctx, o) {
       ? (narrow
         ? 'L' + (li + 1) + ' K' + st.conv.k + (st.res ? ' res' : '') + (st.pooled ? ' ↓' : '')
         : 'LAYER ' + (li + 1) + ' · K=' + st.conv.k + (st.res ? ' · res' : '') + (st.pooled ? ' · pool' : ''))
+      : st.resblock
+        ? (narrow ? 'B' + (li + 1) + ' ' + st.block.kernels.join('-')
+          : 'BLOCK ' + (li + 1) + ' · K ' + st.block.kernels.join('-'))
+      : st.inception
+        ? 'MODULE ' + (li + 1) + ' · K ' + st.module.kernels.join('/')
       : st.mlp
         ? 'LAYER ' + (li + 1) + ' · DENSE · ' + (li === 0 ? WIN : model.stages[li - 1].C) + ' in'
       : st.kan
@@ -346,7 +385,17 @@ function drawNetwork(ctx, o) {
           drawWave(ctx, nd.x + 4, nd.y + 4, nd.w - 8, nd.h - 8, snap, c * st.L, st.L, scale);
         }
       }
-      if (st.conv) {
+      if (st.inception) {
+        // which branch this channel comes from
+        const { bi } = st.module.branchOf(c);
+        const name = bi < st.module.kernels.length ? 'K' + st.module.kernels[bi] : 'pool';
+        ctx.font = '600 9px system-ui, sans-serif';
+        const tw = ctx.measureText(name).width + 6;
+        ctx.fillStyle = INCEPTION_COLORS[bi % INCEPTION_COLORS.length];
+        ctx.fillRect(nd.x + 3, nd.y + 2, tw, 12);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(name, nd.x + 6, nd.y + 11);
+      } else if (st.conv) {
         // small kernel glyph in the top-left corner, on a light backing
         const kw = Math.min(30, st.conv.k * 4);
         ctx.fillStyle = 'rgba(255,255,255,0.86)';
@@ -364,15 +413,17 @@ function drawNetwork(ctx, o) {
     }
   }
 
-  // residual skips: y = f(x) + x, drawn under the two columns they join
+  // residual skips: y = f(x) + x, drawn under the columns they join
   for (let li = 0; li < model.stages.length; li++) {
     const st = model.stages[li];
-    if (!st.res) continue;
-    const a = cols[li], b = cols[li + 1];
+    const arc = skipArc(st, li);
+    if (!arc) continue;
+    const a = cols[arc.from], b = cols[li + 1];
     const bottom = (col) => col.nodes[col.nodes.length - 1].y + col.nodes[col.nodes.length - 1].h;
     const x1 = a.x + a.nodes[0].w / 2, x2 = b.x + b.nodes[0].w / 2;
     const y1 = bottom(a) + 3, y2 = bottom(b) + 3;
-    const yb = Math.max(y1, y2) + 18;
+    let yb = Math.max(y1, y2) + 18;
+    for (let k = arc.from + 1; k <= li; k++) yb = Math.max(yb, bottom(cols[k]) + 18);   // pass under the columns between
     ctx.save();
     ctx.strokeStyle = '#2b6cb0';
     ctx.globalAlpha = 0.75;
@@ -388,7 +439,8 @@ function drawNetwork(ctx, o) {
     ctx.moveTo(x2, y2); ctx.lineTo(x2 - 4, y2 + 7); ctx.lineTo(x2 + 4, y2 + 7); ctx.closePath();
     ctx.fill();
     ctx.font = '600 9px system-ui, sans-serif';
-    ctx.fillText(st.proj ? '+ skip (1×1)' : '+ skip', (x1 + x2) / 2 - (st.proj ? 26 : 14), yb - 2);
+    const tag = '+ ' + (arc.label || 'skip') + (arc.proj ? ' (1×1)' : '');
+    ctx.fillText(tag, (x1 + x2) / 2 - ctx.measureText(tag).width / 2, yb - 2);
     ctx.restore();
   }
 
@@ -461,6 +513,19 @@ function drawSelectionOverlay(ctx, o) {
       span(prevCol.nodes[0], 5, WIN, tPos, tPos, 'rgba(29,78,216,0.55)');
       span(cols[1].nodes[sel.ch], 4, WIN, tPos, tPos, 'rgba(29,78,216,0.55)');
     }
+    return;
+  }
+  if (st.resblock || st.inception) {
+    // the window the block can see: its kernels stacked (ResNet) or the longest branch (Inception)
+    let lo = 0, hi = 0;
+    if (st.resblock) {
+      st.block.convs.forEach((cv) => { lo += cv.tapOffset(0); hi += cv.tapOffset(cv.k - 1); });
+    } else {
+      st.module.branches.forEach((cv) => { lo = Math.min(lo, cv.tapOffset(0)); hi = Math.max(hi, cv.tapOffset(cv.k - 1)); });
+      lo = Math.min(lo, -1); hi = Math.max(hi, 1);
+    }
+    prevCol.nodes.forEach((nd) => span(nd, inner, prevLen, tPos + lo, tPos + hi, 'rgba(29,78,216,0.16)'));
+    span(cols[sel.layer + 1].nodes[sel.ch], 4, st.L, tPos, tPos, 'rgba(29,78,216,0.55)');
     return;
   }
   if (st.conv) {

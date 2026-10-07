@@ -628,6 +628,158 @@ const Flow = (() => {
     return svg(940, H, s, 'KAN node ' + (o.ch + 1) + ' of layer ' + (o.li + 1) + ': φ(x) = w_b·silu(x) + Σ c_m·B_m(x) on every edge.');
   }
 
+  /* ------------------------------------------------------ ResNet-1D block */
+  /** A conv → LN → ReLU stage drawn as one box, with the numbers of channel ch at t inside. */
+  function stageBox(x, y, w, r, last, tipText) {
+    const h = last ? 58 : 74;
+    let s = '<g class="blk">' + tip(tipText) +
+      '<rect x="' + x + '" y="' + (y - h / 2) + '" width="' + w + '" height="' + h + '" rx="7" fill="#fff" stroke="' + BLUE + '" stroke-width="1.3"/>' +
+      '<rect x="' + x + '" y="' + (y - h / 2) + '" width="' + w + '" height="20" rx="7" fill="' + BLUE + '"/>' +
+      '<rect x="' + x + '" y="' + (y - h / 2 + 12) + '" width="' + w + '" height="8" fill="' + BLUE + '"/>' +
+      txt(x + w / 2, y - h / 2 + 14, 'conv K=' + r.k + (r.bn ? ' → LN' : '') + (last ? '' : ' → ReLU'), { size: 11, color: '#fff', weight: 600 });
+    let ly = y - h / 2 + 36;
+    const line = (a, v) => {
+      s += txt(x + 10, ly, a, { size: 10.5, anchor: 'start', color: MUTED }) +
+        txt(x + w - 10, ly, num(v), { size: 10.5, anchor: 'end', mono: true, color: signColor(v), weight: 600 });
+      ly += 16;
+    };
+    line('z (conv + bias)', r.z);
+    if (r.bn) line('after LN', r.n);
+    if (!last) line('after ReLU', r.h);
+    return s + '</g>';
+  }
+
+  /**
+   * @param d { rows:[{k, z, bn, n, h}], skip:{s, kind, x}|null, sum, out, xin, bn }
+   * @param o { li, ch, t }
+   */
+  function resblock(d, o) {
+    const M = 110, n = d.rows.length;
+    const w = n === 3 ? 150 : 170, gap = 34, x0 = 130;
+    let s = '';
+    s += pill(62, M, 'x', d.xin, { tip: 'the block input at t = ' + o.t + (d.skip && d.skip.kind === 'identity'
+      ? ', channel ' + (o.ch + 1) : ' (channel 1 shown; the first convolution reads all of them)') });
+    s += txt(62, M - 22, 'block input', { size: 11, color: MUTED });
+    let x = x0;
+    s += wire([[100, M], [x - 2, M]]);
+    d.rows.forEach((r, i) => {
+      const last = i === n - 1;
+      const bnTxt = r.bn ? '\nLN: (z − μ)/σ · γ + β = (' + num(r.z, 4) + ' − ' + num(r.bn.mu, 3) + ') / ' + num(r.bn.sd, 3) +
+        ' · ' + num(r.bn.gamma, 3) + ' + ' + num(r.bn.beta, 3) + ' = ' + num(r.n, 4) : '';
+      s += stageBox(x, M, w, r, last, 'conv ' + (i + 1) + ' (K=' + r.k + ') of the block, output channel ' + (o.ch + 1) +
+        '\nz = Σ over all input channels and taps + bias = ' + num(r.z, 4) + bnTxt +
+        (last ? '' : '\nReLU → ' + num(r.h, 4)) +
+        (i > 0 ? '\nEvery convolution mixes all ' + d.F + ' channels of the one before; channel ' + (o.ch + 1) + ' is followed here.' : ''));
+      x += w;
+      if (!last) { s += wire([[x + 2, M], [x + gap - 2, M]]); x += gap; }
+    });
+    // the end of the block: + skip, then ReLU
+    let after = x + 2;
+    const yS = M + 108;
+    if (d.skip) {
+      s += wire([[after, M], [after + 32, M]]);
+      const px = after + 46;
+      s += op(px, M, '+', { tip: 'y = ' + (d.bn ? 'LN(z)' : 'z') + ' + skip = ' + num(d.rows[n - 1].n, 4) + ' + ' + num(d.skip.s, 4) + ' = ' + num(d.sum, 4) });
+      s += wire([[62, M + 10], [62, yS], [px, yS], [px, M + 14]], { color: BLUE, dash: true });
+      if (d.skip.kind === 'proj') {
+        s += wbox((62 + px) / 2 - 60, yS, '1×1 conv' + (d.bn ? ' + LN' : ''), { w: 104,
+          tip: 'the channel count changes, so the skip is a learned 1×1 convolution' + (d.bn ? ' with its own LN' : '') + ' = ' + num(d.skip.s, 4) });
+        s += pill((62 + px) / 2 + 62, yS, 'skip', d.skip.s);
+      } else {
+        s += pill((62 + px) / 2, yS, 'skip', d.skip.s, { tip: 'x[' + o.ch + '][' + o.t + '] — the block input, added back untouched' });
+      }
+      s += txt(80, yS - 10, 'skip connection', { size: 10.5, color: BLUE, anchor: 'start' });
+      s += pill(px + 2, M - 26, 'y', d.sum);
+      after = px + 14;
+    } else {
+      s += txt(x0, yS - 20, 'skip connections are off — this block is a plain stack of ' + n + ' convolutions',
+        { size: 11, color: MUTED, anchor: 'start' });
+    }
+    s += wire([[after, M], [after + 24, M]]);
+    const rx = after + 56;
+    s += gate(rx, M, 'ReLU', d.out, { w: 64, tip: 'out = max(0, ' + num(d.sum, 4) + ') = ' + num(d.out, 4) });
+    s += wire([[rx + 33, M], [rx + 70, M]]);
+    s += txt(rx + 76, M + 5, 'out', { size: 14, weight: 600, anchor: 'start' });
+    const W = rx + 120;
+    return svg(W, yS + 34, s, 'Residual block ' + (o.li + 1) + ', channel ' + (o.ch + 1) + ' at t = ' + o.t + '.');
+  }
+
+  /* ------------------------------------------------------ Inception module */
+  const BRANCH_COLORS = ['#2b6cb0', '#2e9e5b', '#8e44ad', '#7b8794'];
+
+  /**
+   * @param d { branches:[{name, val, act, sel}], bott:{B, vals}|null, pre, bn, relu, shortcut:{s, sum, out}|null,
+   *            xin, f, nb }
+   * @param o { li, ch, t }
+   */
+  function inception(d, o) {
+    let s = '';
+    const ys = [62, 128, 194, 268];
+    const BX = 400, CX = 540;
+    s += pill(56, 165, 'x', d.xin, { tip: 'the module input at t = ' + o.t });
+    s += txt(56, 143, 'module input', { size: 11, color: MUTED });
+    let from = 96;
+    if (d.bott) {
+      s += wire([[96, 165], [170, 165]]);
+      s += wbox(212, 165, '1×1 ×' + d.bott.B, { w: 80, tip: 'bottleneck: ' + d.bott.B + ' channels, each a weighted sum of the input channels\nat t: ' +
+        d.bott.vals.map((v, i) => 'b' + i + ' = ' + num(v, 4)).join('  ') });
+      s += txt(212, 196, 'bottleneck', { size: 10.5, color: MUTED });
+      from = 252;
+    }
+    let mx = 1e-6;
+    d.branches.forEach((b) => { mx = Math.max(mx, b.act); });
+    d.branches.forEach((b, bi) => {
+      const y = ys[bi], isPool = bi === d.branches.length - 1;
+      const src = isPool ? 96 : from;
+      const srcY = 165;
+      s += wire([[src, srcY], [src + 30, srcY], [src + 30, y], [BX - 58, y]], { color: b.sel ? INK : '#9aa5b1', width: b.sel ? 1.6 : 1, over: true });
+      const label = isPool ? 'max 3 → 1×1' : 'conv ' + b.name;
+      s += gate(BX, y, label, b.val, { w: 112, fill: b.sel ? BRANCH_COLORS[bi] : '#b8c4d2',
+        tip: (isPool ? 'pool branch: max over t−1 … t+1 of each input channel, then a 1×1 convolution'
+          : 'branch ' + b.name + ': a convolution of length ' + b.name.slice(2) + (d.bott ? ' over the bottleneck' : ' over the input')) +
+          '\nchannel ' + (b.slot + 1) + ' of this branch at t: ' + num(b.val, 4) +
+          '\nmean activity of the branch over the window: ' + num(b.act, 4) + (b.sel ? '\n← the selected channel is in this branch' : '') });
+      // activity bar: how strongly the branch responds to this example
+      const bw = 100 * b.act / mx;
+      s += '<rect x="' + (BX - 50) + '" y="' + (y + 25) + '" width="100" height="4" rx="2" fill="#e3e9f1"/>' +
+        '<rect x="' + (BX - 50) + '" y="' + (y + 25) + '" width="' + bw + '" height="4" rx="2" fill="' + BRANCH_COLORS[bi] + '"/>';
+      s += wire([[BX + 58, y], [CX - 18, y]], { color: b.sel ? INK : '#9aa5b1', width: b.sel ? 1.6 : 1 });
+    });
+    s += txt(BX, 22, 'four branches side by side — bar: mean activity on this example', { size: 10.5, color: MUTED });
+    s += '<g class="blk">' + tip('the four branch outputs stacked into one map of ' + (d.f * d.nb) + ' channels') +
+      '<rect x="' + (CX - 16) + '" y="40" width="32" height="250" rx="6" fill="#edf3fc" stroke="' + BLUE + '"/>' +
+      '<text x="' + CX + '" y="165" text-anchor="middle" font-size="11" fill="' + BLUE + '" font-weight="600" transform="rotate(-90 ' + CX + ' 165)">concat</text></g>';
+    const M = ys[d.branches.findIndex((b) => b.sel)];
+    let x = CX + 16;
+    if (d.bn) {
+      s += wire([[x, M], [x + 40, M]]);
+      x += 74;
+      s += gate(x, M, 'LN', d.bn.out, { w: 64, tip: 'LN: (' + num(d.pre, 4) + ' − ' + num(d.bn.mu, 3) + ') / ' + num(d.bn.sd, 3) +
+        ' · ' + num(d.bn.gamma, 3) + ' + ' + num(d.bn.beta, 3) + ' = ' + num(d.bn.out, 4) });
+      x += 32;
+    }
+    s += wire([[x, M], [x + 36, M]]);
+    x += 70;
+    s += gate(x, M, 'ReLU', d.relu, { w: 64, tip: 'max(0, ' + num(d.bn ? d.bn.out : d.pre, 4) + ') = ' + num(d.relu, 4) });
+    x += 32;
+    let outV = d.relu;
+    if (d.shortcut) {
+      s += wire([[x, M], [x + 22, M]]);
+      x += 36;
+      s += op(x, M, '+', { tip: 'shortcut around the three modules: ReLU(' + num(d.relu, 4) + ' + ' + num(d.shortcut.s, 4) + ') = ' + num(d.shortcut.out, 4) });
+      s += wire([[56, 178], [56, 312], [x, 312], [x, M + 14]], { color: BLUE, dash: true });
+      s += pill((56 + x) / 2, 312, 'shortcut (1×1)', d.shortcut.s, { tip: 'from the input of the first module, through a 1×1 convolution' });
+      outV = d.shortcut.out;
+      x += 14;
+    }
+    s += wire([[x, M], [x + 50, M]]);
+    s += pill(x + 25, M - 22, '', outV, { tip: 'the value drawn in this channel\'s map' });
+    s += txt(x + 56, M + 5, 'out', { size: 14, weight: 600, anchor: 'start' });
+    const W = Math.max(940, x + 100);
+    return svg(W, d.shortcut ? 330 : 300, s, 'Inception module ' + (o.li + 1) + ', channel ' + (o.ch + 1) + ' (' +
+      d.branches.find((b) => b.sel).name + ' branch) at t = ' + o.t + '.');
+  }
+
   /* ------------------------------------------------------ state space */
   /**
    * @param d  stepDetail() of the selected channel
@@ -830,5 +982,5 @@ const Flow = (() => {
       (o.trueIdx >= 0 ? ' The true class is in bold.' : ''));
   }
 
-  return { lstm, gru, rnn, conv, ssm, gnn, output, dense, kan };
+  return { lstm, gru, rnn, conv, ssm, gnn, output, dense, kan, resblock, inception };
 })();

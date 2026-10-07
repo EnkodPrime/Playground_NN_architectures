@@ -4,10 +4,12 @@ An interactive playground for neural network architectures on **signals**, in th
 [TensorFlow Playground](https://playground.tensorflow.org/) but for time series instead of 2D
 points. The task is recognising power-quality disturbances in 50 Hz mains voltage.
 
-Six architectures share the same data, metrics and tooling, switchable at the top of the page:
+Eight architectures share the same data, metrics and tooling, switchable at the top of the page:
 
 * **MLP** — fully connected layers over the raw window, the baseline with no structure at all
-* **1D CNN** — convolutional filters over the window, optionally with residual (ResNet) skips
+* **1D CNN** — convolutional filters over the window, optionally with residual skips
+* **ResNet-1D** — residual blocks of three convolutions with normalisation (Wang et al. 2017)
+* **InceptionTime** — parallel convolutions of three lengths plus a pooling branch (Ismail Fawaz et al. 2020)
 * **RNN** — recurrent cells over the same window: simple tanh RNN, GRU or LSTM
 * **S4 / Mamba** — state space models: S4D (diagonal, time-invariant) and a Mamba-style
   selective SSM
@@ -88,6 +90,25 @@ model is no longer time-invariant and has no fixed kernel; the inspector shows �
 block also carries the short causal depthwise convolution and the SiLU gate branch of the original,
 without which a real-diagonal state is only a running average and cannot resolve a frequency.
 
+**ResNet-1D.** 1–3 residual blocks of 2–10 channels, the standard deep baseline for time series
+classification, scaled down: in every block conv → norm → ReLU for kernels 8, 5 and 3 (or 7-5-3,
+5-3, 3-3-3), the last ReLU after the skip is added; the skip is the identity, or a 1×1 convolution
+with its own norm when the width changes. Then Global Average Pooling and a linear layer. The
+original uses batch norm, which needs a whole mini-batch and couples the examples in its gradient;
+this engine trains one example at a time, so the blocks use layer norm (GroupNorm with one group,
+exact gradient). A batch norm on running averages was tried first and made training worse. Measured
+with 3 blocks on four classes, 20 epochs: layer norm and skips 99–100%, layer norm alone 96–97%, no
+normalisation 69–91%.
+
+**InceptionTime.** 1–3 modules: a 1×1 bottleneck (when there is more than one input channel),
+convolutions of length 5, 11 and 23 side by side (10/20/40 in the original, for longer series), and
+a max-pool branch with its own 1×1 convolution, stacked, normalised and passed through ReLU; 1–3
+filters per branch. With three modules one shortcut runs around all of them, as in the original
+(one every three modules). Each box is tagged with its branch, and hovering one shows how strongly
+each branch answers the current example — after training on all eight classes the K=23 branch is
+the most active for harmonics. It is the slowest of the networks to get going: the loss can sit at
+equal odds for several epochs, and about one run in five needs a reset.
+
 **KAN.** 1–3 Kolmogorov–Arnold layers of 1–10 nodes, then a linear layer to the classes. Every
 edge carries φ(x) = w_b·silu(x) + Σ c_m·B_m(x), with cubic B-splines on 5 grid intervals over
 −2 … 2 — nine numbers per edge — and the node only sums its edges. Deeper layers read their
@@ -105,8 +126,9 @@ neighbours by mean, max or sum. The inspector draws the graph as an arc diagram 
 
 All of them feed a linear layer and softmax, and are trained with **Adam** and cross-entropy plus
 optional L2. Forward and backward passes are written from scratch in `js/nn.js`, `js/rnn.js`,
-`js/ssm.js`, `js/mlp.js` and `js/kan.js` — convolution, residual blocks, pooling, three recurrent
-cells, both state space variants, B-spline edges, dense layer and softmax, all over flat
+`js/ssm.js`, `js/mlp.js`, `js/kan.js` and `js/blocks.js` — convolution, residual and Inception
+blocks, group/layer normalisation, pooling, three recurrent cells, both state space variants,
+B-spline edges, dense layer and softmax, all over flat
 `Float32Array`s indexed as `[channel * length + t]`. Every gradient,
 including the complex chain rule through `Ā` and `B̄`, agrees with numeric finite differences to
 within 1% at the full sequence length.
@@ -182,6 +204,7 @@ binomial test. Includes pruning and fine-tuning attacks to see how much of it su
 | `js/gnn.js` | visibility graph construction, message passing, arc diagram |
 | `js/mlp.js` | multilayer perceptron over the raw window |
 | `js/kan.js` | Kolmogorov–Arnold layers: B-spline edges, running grid statistics |
+| `js/blocks.js` | ResNet-1D and InceptionTime: residual blocks, Inception modules, group normalisation |
 | `js/viz.js` | layout and canvas drawing |
 | `js/stream.js` | live generator, scope and decision ribbon |
 | `js/ood.js` | novelty scores, calibration, AUC, histograms |

@@ -12,6 +12,10 @@ const state = {
   gnnLayers: [{ units: 8 }, { units: 8 }],
   mlpLayers: [{ units: 8 }],
   kanLayers: [{ units: 4 }, { units: 4 }],
+  resLayers: [{ filters: 6, kernels: '8-5-3' }, { filters: 6, kernels: '8-5-3' }],
+  incLayers: [{ filters: 2 }, { filters: 2 }],
+  skip: true,                  // shortcuts in ResNet-1D and InceptionTime
+  bn: true,                    // layer norm in ResNet-1D and InceptionTime
   residual: false,             // ResNet skips in the convolutional playground
   agg: 'mean',
   cell: 'gru',
@@ -111,13 +115,15 @@ function archLayers() {
   if (state.arch === 'rnn') return state.rnnLayers;
   if (state.arch === 'mlp') return state.mlpLayers;
   if (state.arch === 'kan') return state.kanLayers;
+  if (state.arch === 'resnet') return state.resLayers;
+  if (state.arch === 'inception') return state.incLayers;
   return state.arch === 'ssm' ? state.ssmLayers : state.gnnLayers;
 }
 
 /** Most layers each playground allows. */
 function maxLayers() {
   if (state.arch === 'cnn') return 8;
-  return state.arch === 'mlp' || state.arch === 'kan' ? 3 : 2;
+  return ['mlp', 'kan', 'resnet', 'inception'].includes(state.arch) ? 3 : 2;
 }
 
 function rebuildModel() {
@@ -135,6 +141,21 @@ function rebuildModel() {
     model = new MLPNet({
       layers: JSON.parse(JSON.stringify(state.mlpLayers)),
       activation: state.activation,
+      nClasses: activeClasses().length,
+      inputLen: WIN,
+    });
+  } else if (state.arch === 'resnet') {
+    model = new ResNet1DNet({
+      layers: JSON.parse(JSON.stringify(state.resLayers)),
+      bn: state.bn, skip: state.skip,
+      nClasses: activeClasses().length,
+      inputLen: WIN,
+    });
+  } else if (state.arch === 'inception') {
+    model = new InceptionTimeNet({
+      layers: JSON.parse(JSON.stringify(state.incLayers)),
+      kernels: [5, 11, 23],
+      bn: state.bn, skip: state.skip,
       nClasses: activeClasses().length,
       inputLen: WIN,
     });
@@ -187,23 +208,23 @@ function rebuildModel() {
   buildLayerControls();
 }
 
-/** Switches between the convolutional and the recurrent playground. */
+/** The tab button of every playground. */
+const ARCH_TABS = {
+  mlp: 'archMlp', cnn: 'archCnn', resnet: 'archRes', inception: 'archInc',
+  rnn: 'archRnn', ssm: 'archSsm', gnn: 'archGnn', kan: 'archKan',
+};
+
+/** Switches between the playgrounds. */
 function setArch(arch) {
   if (state.arch === arch) return;
   state.arch = arch;
   state.selected = null;
   document.body.className = 'arch-' + arch;
-  $('archCnn').classList.toggle('on', arch === 'cnn');
-  $('archRnn').classList.toggle('on', arch === 'rnn');
-  $('archSsm').classList.toggle('on', arch === 'ssm');
-  $('archGnn').classList.toggle('on', arch === 'gnn');
-  $('archMlp').classList.toggle('on', arch === 'mlp');
-  $('archKan').classList.toggle('on', arch === 'kan');
-  $('layerLbl').textContent = arch === 'cnn' ? 'Convolutional layers'
-    : arch === 'rnn' ? 'Recurrent layers'
-      : arch === 'mlp' ? 'Hidden layers'
-        : arch === 'kan' ? 'KAN layers'
-          : arch === 'ssm' ? 'State space layers' : 'Message passing layers';
+  Object.entries(ARCH_TABS).forEach(([a, id]) => $(id).classList.toggle('on', arch === a));
+  $('layerLbl').textContent = {
+    cnn: 'Convolutional layers', resnet: 'Residual blocks', inception: 'Inception modules', rnn: 'Recurrent layers',
+    mlp: 'Hidden layers', kan: 'KAN layers', ssm: 'State space layers', gnn: 'Message passing layers',
+  }[arch];
   setStream(false);
   ood.cal = null; ood.stats = null;
   wm.last = null; wm.sweep = null;
@@ -568,6 +589,56 @@ function drawInspector(probs, oodInfo) {
     }
     return;
   }
+  if (h0 && h0.type === 'filter' && model.kind === 'resnet') {
+    const st = model.stages[h0.layer], blk = st.block, cv = blk.convs[blk.convs.length - 1];
+    const show = Math.min(cv.cin, 4);
+    title('LAST CONVOLUTION OF THE BLOCK · K=' + cv.k + (cv.cin > 1 ? ' (' + show + ' of ' + cv.cin + ' inputs)' : ''), 10);
+    const kw = (w - (show - 1) * 6) / show;
+    for (let ci = 0; ci < show; ci++) {
+      const x = ci * (kw + 6);
+      ctx.strokeStyle = '#eceff3'; ctx.strokeRect(x, 14, kw, 34);
+      drawKernel(ctx, x + 3, 16, kw - 6, 30, cv.W, (h0.ch * cv.cin + ci) * cv.k, cv.k);
+    }
+    title('OUTPUT MAP FOR THIS EXAMPLE', 66);
+    if (st.snapshot) drawWave(ctx, 0, 70, w, 60, st.snapshot, h0.ch * st.L, st.L, maxAbs(st.snapshot, 0, st.snapshot.length));
+    let rf = 1;
+    for (let i = 0; i <= h0.layer; i++) model.stages[i].block.kernels.forEach((k) => { rf += k - 1; });
+    txt.innerHTML = '<b>Block ' + (h0.layer + 1) + ', channel ' + (h0.ch + 1) + '</b> · kernels ' + blk.kernels.join('-') +
+      ' · ' + (blk.skip ? (blk.proj ? 'skip through a 1×1 convolution' : 'identity skip') : 'no skip') +
+      ' · ' + (blk.useBn ? 'layer norm' : 'no normalisation') +
+      '<br>Receptive field ≈ ' + rf + ' samples (' + (rf / SR * 1000).toFixed(1) + ' ms): every block adds the lengths of its kernels.';
+    return;
+  }
+  if (h0 && h0.type === 'filter' && model.kind === 'inception') {
+    const st = model.stages[h0.layer], m = st.module, { bi, j } = m.branchOf(h0.ch);
+    title('MEAN ACTIVITY PER BRANCH ON THIS EXAMPLE', 10);
+    const acts = [];
+    for (let b = 0; b < m.nb; b++) {
+      let a = 0;
+      for (let q = 0; q < m.f; q++) for (let t = 0; t < st.L; t++) a += Math.abs(st.snapshot[(b * m.f + q) * st.L + t]);
+      acts.push(a / (m.f * st.L));
+    }
+    const am = Math.max(1e-6, ...acts);
+    acts.forEach((a, b) => {
+      const y = 16 + b * 15;
+      ctx.fillStyle = '#98a2ad'; ctx.font = '9px system-ui,sans-serif';
+      ctx.fillText(m.branchName(b), 0, y + 9);
+      ctx.fillStyle = '#eef1f4'; ctx.fillRect(40, y + 2, w - 44, 9);
+      ctx.fillStyle = INCEPTION_COLORS[b]; ctx.fillRect(40, y + 2, (w - 44) * a / am, 9);
+    });
+    title(bi < m.kernels.length ? 'THIS CHANNEL\'S KERNEL — BRANCH ' + m.branchName(bi) : 'POOL BRANCH — MAX OVER 3, THEN 1×1', 88);
+    if (bi < m.kernels.length) {
+      const cv = m.branches[bi];
+      drawKernel(ctx, 0, 92, w, 26, cv.W, (j * cv.cin) * cv.k, cv.k);
+    }
+    title('OUTPUT MAP FOR THIS EXAMPLE', 128);
+    if (st.snapshot) drawWave(ctx, 0, 132, w, 34, st.snapshot, h0.ch * st.L, st.L, maxAbs(st.snapshot, 0, st.snapshot.length));
+    txt.innerHTML = '<b>Module ' + (h0.layer + 1) + ', channel ' + (h0.ch + 1) + '</b> · ' + m.branchName(bi) +
+      ' branch, filter ' + (j + 1) + ' of ' + m.f +
+      '<br>Short kernels answer to sharp, local events, long ones see a whole stretch of the cycle. ' +
+      'The bars show which branch carries this example.';
+    return;
+  }
   if (h0 && h0.type === 'filter' && model.kind === 'mlp') {
     const st = model.stages[h0.layer], d = st.dense, first = h0.layer === 0;
     const off = h0.ch * d.nin;
@@ -891,6 +962,8 @@ function renderMathInner(host) {
     if (model.kind === 'rnn') renderUnitMath(host, title, slider, sel);
     else if (model.kind === 'mlp') renderMlpMath(host, title, slider, sel);
     else if (model.kind === 'kan') renderKanMath(host, title, slider, sel);
+    else if (model.kind === 'resnet') renderResBlockMath(host, title, slider, sel);
+    else if (model.kind === 'inception') renderInceptionMath(host, title, slider, sel);
     else if (model.kind === 'gnn') renderGnnMath(host, title, slider, sel);
     else if (model.kind === 'ssm') renderSsmMath(host, title, slider, sel);
     else renderFilterMath(host, title, slider, sel);
@@ -1264,6 +1337,287 @@ function rnnDownstreamHtml(li, unit, num) {
   }
   html += '</tbody></table></div>';
   return html;
+}
+
+/* ------------------------------------------- ResNet-1D and InceptionTime */
+/** The products of one convolution output (channel co, position t), for any conv and input. */
+function convTermsOf(conv, xin, Lin, co, t) {
+  const K = conv.k, cin = conv.cin;
+  const terms = [];
+  let sum = 0;
+  for (let ci = 0; ci < cin; ci++) {
+    const row = [];
+    let sub = 0;
+    for (let j = 0; j < K; j++) {
+      const idx = t + conv.tapOffset(j);
+      const outside = idx < 0 || idx >= Lin;
+      const xv = outside ? 0 : xin[ci * Lin + idx];
+      const w = conv.W[(co * cin + ci) * K + j];
+      sub += w * xv;
+      row.push({ idx, xv, w, p: w * xv, outside });
+    }
+    sum += sub;
+    terms.push({ ci, row, sub });
+  }
+  return { z: sum + conv.b[co], sum, bias: conv.b[co], terms, K, cin, conv };
+}
+
+/** The table of value × weight products behind one convolution output. */
+function termsTableHtml(c, chName) {
+  const rows = c.terms.slice(0, 10);
+  let html = '<div class="scrollx"><table class="mtab"><thead><tr><th>input</th>';
+  for (let j = 0; j < c.K; j++) html += '<th>j=' + j + '<br>x[' + c.terms[0].row[j].idx + ']</th>';
+  html += '<th>Σ per channel</th></tr></thead><tbody>';
+  rows.forEach((tr) => {
+    html += '<tr><td class="ch">' + chName(tr.ci) + '</td>';
+    tr.row.forEach((cell) => {
+      html += '<td class="cell' + (cell.outside ? ' pad' : '') + '"><span class="xv">' +
+        (cell.outside ? '0 (outside)' : n3(cell.xv)) + '</span><span class="wv" style="color:' + wColor(cell.w) +
+        '">×' + n3(cell.w) + '</span><span class="pv">' + n3(cell.p) + '</span></td>';
+    });
+    html += '<td class="sum">' + n3(tr.sub) + '</td></tr>';
+  });
+  if (c.terms.length > rows.length) {
+    let rest = 0;
+    c.terms.slice(rows.length).forEach((tr) => { rest += tr.sub; });
+    html += '<tr><td class="ch">the other ' + (c.terms.length - rows.length) + '</td><td colspan="' + c.K +
+      '"></td><td class="sum">' + n3(rest) + '</td></tr>';
+  }
+  html += '</tbody></table></div>';
+  html += '<div class="formula" style="margin-top:8px">Σ (all ' + (c.cin * c.K) + ' products) = <b>' + n4(c.sum) +
+    '</b>  <span class="op">+</span>  bias = <b style="color:' + wColor(c.bias) + '">' + n4(c.bias) +
+    '</b>  <span class="op">→</span>  z = <span class="res">' + n4(c.z) + '</span></div>';
+  return html;
+}
+
+/** One value through layer norm, with every constant shown. */
+function bnFormula(e, z) {
+  return 'LN: (z − μ) / σ · γ + β = (' + n4(z) + ' − ' + n3(e.mu) + ') / ' + n3(e.sd) + ' · ' + n3(e.gamma) +
+    ' + ' + n3(e.beta) + ' = <span class="res">' + n4(e.out) + '</span>';
+}
+
+function deepSlider(slider, L) {
+  slider.disabled = false;
+  slider.max = L - 1;
+  const t = Math.min(state.tPos, L - 1);
+  state.tPos = t;
+  slider.value = t;
+  $('tposVal').textContent = 't = ' + t + '  (' + (t / SR * 1000).toFixed(2) + ' ms)';
+  return t;
+}
+
+function renderResBlockMath(host, title, slider, sel) {
+  const li = sel.layer, ch = sel.ch;
+  const st = model.stages[li];
+  if (!st || ch >= st.C || !st.block.trace) { state.selected = null; return renderMathInner(host); }
+  const blk = st.block, tr = blk.trace, L = st.L, n = blk.convs.length;
+  const t = deepSlider(slider, L);
+  const at = ch * L + t;
+  title.textContent = 'Block ' + (li + 1) + ' · channel ' + (ch + 1) + ' · position t = ' + t;
+
+  const rows = tr.map((r, i) => ({
+    k: blk.kernels[i], z: r.z[at], bn: blk.bns[i] ? blk.bns[i].explain(ch, r.z[at], r.stat) : null,
+    n: r.n[at], h: i < n - 1 ? r.h[at] : null,
+  }));
+  const last = tr[n - 1];
+  const skip = blk.skip ? { s: last.s[at], kind: blk.proj ? 'proj' : 'identity' } : null;
+  const xin = blk.cin === blk.F ? blk.input[at] : blk.input[t];
+  setFlow(Flow.resblock({ rows, skip, sum: last.sum[at], out: last.h[at], xin, bn: blk.useBn, F: blk.F }, { li, ch, t }));
+
+  const inName = (c) => (li === 0 ? 'signal' : 'B' + li + ' ch' + (c + 1));
+  let html = '<h4>1 · The residual block</h4>';
+  html += '<div class="formula">' + blk.kernels.map((k, i) => (i < n - 1
+    ? 'h<sub>' + (i + 1) + '</sub> = ReLU(' + (blk.useBn ? 'LN(' : '') + 'conv<sub>K=' + k + '</sub>(' + (i ? 'h<sub>' + i + '</sub>' : 'x') + ')' + (blk.useBn ? ')' : '') + ')'
+    : 'out = ReLU(' + (blk.useBn ? 'LN(' : '') + 'conv<sub>K=' + k + '</sub>(' + (i ? 'h<sub>' + i + '</sub>' : 'x') + ')' + (blk.useBn ? ')' : '') +
+      (blk.skip ? ' + ' + (blk.proj ? (blk.useBn ? 'LN(1×1(x))' : '1×1(x)') : 'x') : '') + ')')).join(' &nbsp;→&nbsp; ') + '</div>';
+  html += '<div class="formula" style="margin-top:6px"><span class="op">As in ResNet-1D for time series (Wang et al. 2017): ' +
+    'three convolutions of falling length, a normalisation after each, ReLU everywhere except before the addition. ' +
+    (blk.useBn ? 'The original uses batch norm, which needs a whole mini-batch; this engine trains one example at a ' +
+      'time, so each map is normalised over its own channels and positions (layer norm, μ and σ from this example).'
+      : 'Normalisation is off.') + '</span></div>';
+
+  html += '<h4>2 · Channel ' + (ch + 1) + ' through the block at t = ' + t + '</h4>';
+  html += '<div class="scrollx"><table class="mtab"><thead><tr><th>step</th><th>conv + bias</th>' +
+    (blk.useBn ? '<th>μ</th><th>σ</th><th>γ</th><th>β</th><th>after LN</th>' : '') + '<th>after ReLU</th></tr></thead><tbody>';
+  rows.forEach((r, i) => {
+    html += '<tr><td class="ch">conv ' + (i + 1) + ' · K=' + r.k + '</td><td>' + n4(r.z) + '</td>' +
+      (r.bn ? '<td>' + n3(r.bn.mu) + '</td><td>' + n3(r.bn.sd) + '</td><td>' + n3(r.bn.gamma) + '</td><td>' +
+        n3(r.bn.beta) + '</td><td>' + n4(r.n) + '</td>' : '') +
+      '<td class="sum">' + (r.h === null ? '<span style="color:#98a2ad">after the skip</span>' : n4(r.h)) + '</td></tr>';
+  });
+  html += '</tbody></table></div>';
+  html += '<div class="formula" style="margin-top:6px"><span class="op">Each convolution reads all ' +
+    (n > 1 ? blk.F : blk.cin) + ' channels of the step before; the table follows channel ' + (ch + 1) + '.</span></div>';
+
+  html += '<h4>3 · The last convolution in detail (K=' + blk.kernels[n - 1] + ')</h4>';
+  const c = convTermsOf(blk.convs[n - 1], n > 1 ? tr[n - 2].h : blk.input, L, ch, t);
+  html += termsTableHtml(c, (ci) => (n > 1 ? 'h' + (n - 1) + ' ch' + (ci + 1) : inName(ci)));
+  if (rows[n - 1].bn) html += '<div class="formula" style="margin-top:6px">' + bnFormula(rows[n - 1].bn, c.z) + '</div>';
+
+  html += '<h4>4 · Skip and ReLU</h4>';
+  if (blk.skip) {
+    html += '<div class="formula">y = ' + (blk.useBn ? 'LN(z)' : 'z') + ' + skip = ' + n4(rows[n - 1].n) + ' + ' +
+      n4(skip.s) + ' = <b>' + n4(last.sum[at]) + '</b>  <span class="op">' + (blk.proj
+        ? '— ' + blk.cin + ' channels in, ' + blk.F + ' out, so the skip is a learned 1×1 convolution' + (blk.useBn ? ' with its own LN' : '')
+        : '— the block input x[' + ch + '][' + t + '] is added back untouched') + '</span></div>';
+  } else {
+    html += '<div class="formula"><span class="op">Skip connections are off: nothing is added, this is a plain ' +
+      n + '-layer convolutional stack.</span></div>';
+  }
+  html += '<div class="formula" style="margin-top:6px">out = ReLU(' + n4(last.sum[at]) + ') = <span class="res">' +
+    n4(last.h[at]) + '</span>  <span class="op">check: the map holds ' + n4(st.snapshot[at]) +
+    (Math.abs(st.snapshot[at] - last.h[at]) < 1e-4 ? ' ✓ matches' : ' ⚠ mismatch') + '</span></div>';
+
+  html += deepDownstreamHtml(li, ch, 5);
+  host.innerHTML = html;
+}
+
+function renderInceptionMath(host, title, slider, sel) {
+  const li = sel.layer, ch = sel.ch;
+  const st = model.stages[li];
+  if (!st || ch >= st.C || !st.module.trace) { state.selected = null; return renderMathInner(host); }
+  const m = st.module, tr = m.trace, L = st.L;
+  const t = deepSlider(slider, L);
+  const { bi, j } = m.branchOf(ch);
+  const nK = m.kernels.length, at = ch * L + t;
+  title.textContent = 'Module ' + (li + 1) + ' · channel ' + (ch + 1) + ' (' + m.branchName(bi) + ' branch) · position t = ' + t;
+
+  const branches = [];
+  for (let b = 0; b < m.nb; b++) {
+    let act = 0;
+    for (let q = 0; q < m.f; q++) for (let tt = 0; tt < L; tt++) act += Math.abs(tr.out[(b * m.f + q) * L + tt]);
+    branches.push({ name: m.branchName(b), val: tr.cat[(b * m.f + j) * L + t], act: act / (m.f * L), sel: b === bi, slot: j });
+  }
+  const pre = tr.cat[at];
+  const bn = m.bn ? m.bn.explain(ch, pre, tr.stat) : null;
+  const relu = tr.out[at];
+  const g = st.shortcut && model.group ? model.group.trace : null;
+  const shortcut = g ? { s: g.s[at], sum: g.sum[at], out: g.out[at] } : null;
+  const bott = m.bott ? { B: m.B, vals: Array.from({ length: m.B }, (_, b) => tr.b[b * L + t]) } : null;
+  setFlow(Flow.inception({ branches, bott, pre, bn, relu, shortcut, xin: tr.x[t], f: m.f, nb: m.nb }, { li, ch, t }));
+
+  const inName = (c) => (li === 0 ? 'signal' : 'M' + li + ' ch' + (c + 1));
+  let html = '<h4>1 · The Inception module</h4>';
+  html += '<div class="formula">out = ReLU( ' + (m.bn ? 'LN( ' : '') + 'concat[ ' +
+    m.kernels.map((k) => 'conv<sub>K=' + k + '</sub>(' + (m.bott ? 'b' : 'x') + ')').join(', ') +
+    ', 1×1(maxpool<sub>3</sub>(x)) ]' + (m.bn ? ' )' : '') + ' )' + (m.bott ? ' &nbsp;&nbsp; b = 1×1 bottleneck(x), ' + m.B + ' channels' : '') + '</div>';
+  html += '<div class="formula" style="margin-top:6px"><span class="op">As in InceptionTime (Ismail Fawaz et al. 2020), ' +
+    'scaled to this window: kernels ' + m.kernels.join(' / ') + ' instead of 10 / 20 / 40, ' + m.f +
+    ' filter' + (m.f > 1 ? 's' : '') + ' per branch instead of 32. Channel ' + (ch + 1) + ' is filter ' + (j + 1) +
+    ' of the ' + m.branchName(bi) + ' branch.</span></div>';
+
+  let sec = 2;
+  if (bott) {
+    html += '<h4>' + (sec++) + ' · Bottleneck at t = ' + t + '</h4>';
+    html += '<div class="formula">' + bott.vals.map((v, b) => 'b' + b + ' = ' + n3(v)).join('   ') +
+      '  <span class="op">— ' + m.cin + ' channels squeezed into ' + m.B + ' by 1×1 convolutions, so the long kernels stay cheap</span></div>';
+  }
+
+  html += '<h4>' + (sec++) + ' · This channel\'s branch: ' + m.branchName(bi) + '</h4>';
+  if (bi < nK) {
+    const c = convTermsOf(m.branches[bi], m.bott ? tr.b : tr.x, L, j, t);
+    html += termsTableHtml(c, (ci) => (m.bott ? 'b' + ci : inName(ci)));
+  } else {
+    const pc = m.poolConv;
+    let sum = 0;
+    html += '<div class="scrollx"><table class="mtab"><thead><tr><th>input</th><th>x[t−1]</th><th>x[t]</th><th>x[t+1]</th>' +
+      '<th>max</th><th>weight</th><th>product</th></tr></thead><tbody>';
+    for (let ci = 0; ci < m.cin; ci++) {
+      const v = (q) => (q < 0 || q >= L ? '—' : n3(tr.x[ci * L + q]));
+      const mxv = tr.pooled[ci * L + t], w = pc.W[j * m.cin + ci];
+      sum += w * mxv;
+      if (ci < 10) {
+        html += '<tr><td class="ch">' + inName(ci) + '</td><td>' + v(t - 1) + '</td><td>' + v(t) + '</td><td>' + v(t + 1) +
+          '</td><td>' + n3(mxv) + '</td><td style="color:' + wColor(w) + '">' + n3(w) + '</td><td class="sum">' + n4(w * mxv) + '</td></tr>';
+      }
+    }
+    html += '</tbody></table></div>';
+    html += '<div class="formula" style="margin-top:8px">Σ = ' + n4(sum) + ' + bias ' + n4(pc.b[j]) +
+      ' = <span class="res">' + n4(sum + pc.b[j]) + '</span>  <span class="op">— the pool branch reads the module input ' +
+      'directly, not the bottleneck</span></div>';
+  }
+
+  html += '<h4>' + (sec++) + ' · Layer norm and ReLU' + (shortcut ? ', then the shortcut' : '') + '</h4>';
+  html += '<div class="formula">' + (bn ? bnFormula(bn, pre) : 'no normalisation: ' + n4(pre)) +
+    '  <span class="op">→</span>  ReLU → <b>' + n4(relu) + '</b></div>';
+  let final = relu;
+  if (shortcut) {
+    html += '<div class="formula" style="margin-top:6px">ReLU( ' + n4(relu) + ' + shortcut ' + n4(shortcut.s) + ' ) = <b>' +
+      n4(shortcut.out) + '</b>  <span class="op">— one shortcut around every three modules, from the input of the first ' +
+      'through a 1×1 convolution' + (model.group.projBn ? ' and LN' : '') + '</span></div>';
+    final = shortcut.out;
+  }
+  html += '<div class="formula" style="margin-top:6px"><span class="op">check: the map holds ' + n4(st.snapshot[at]) +
+    (Math.abs(st.snapshot[at] - final) < 1e-4 ? ' ✓ matches' : ' ⚠ mismatch') + '</span></div>';
+
+  html += '<h4>' + (sec++) + ' · All four branches</h4>';
+  html += '<div class="scrollx"><table class="mtab"><thead><tr><th>branch</th><th>filter ' + (j + 1) +
+    ' at t (before LN)</th><th>mean activity on this example</th></tr></thead><tbody>';
+  branches.forEach((b) => {
+    html += '<tr' + (b.sel ? ' style="background:#eef4fd"' : '') + '><td class="ch">' + b.name + (b.sel ? ' ←' : '') +
+      '</td><td>' + n4(b.val) + '</td><td class="sum">' + n4(b.act) + '</td></tr>';
+  });
+  html += '</tbody></table></div>';
+
+  html += deepDownstreamHtml(li, ch, sec);
+  host.innerHTML = html;
+}
+
+/** Where a ResNet / Inception map goes: the next block, or the average pool and the logits. */
+function deepDownstreamHtml(li, ch, sec) {
+  const st = model.stages[li], L = st.L;
+  const last = li === model.stages.length - 1;
+  let html = '<h4>' + sec + ' · Where this map goes</h4>';
+  if (!last) {
+    const nx = model.stages[li + 1];
+    if (nx.resblock) {
+      const cv = nx.block.convs[0];
+      html += '<div class="formula">This map is input channel ' + (ch + 1) + ' of block ' + (li + 2) +
+        '. Its first convolution (K=' + cv.k + ') gives it these weights in each of its ' + cv.cout + ' filters:</div>';
+      html += '<div class="scrollx"><table class="mtab"><thead><tr><th>filter</th>';
+      for (let k = 0; k < cv.k; k++) html += '<th>w[' + k + ']</th>';
+      html += '<th>Σ|w|</th></tr></thead><tbody>';
+      for (let co = 0; co < cv.cout; co++) {
+        let s = 0;
+        html += '<tr><td class="ch">filter ' + (co + 1) + '</td>';
+        for (let k = 0; k < cv.k; k++) {
+          const w = cv.W[(co * cv.cin + ch) * cv.k + k];
+          s += Math.abs(w);
+          html += '<td style="color:' + wColor(w) + '">' + n3(w) + '</td>';
+        }
+        html += '<td class="sum">' + n3(s) + '</td></tr>';
+      }
+      return html + '</tbody></table></div>';
+    }
+    const m = nx.module;
+    html += '<div class="formula">This map enters module ' + (li + 2) + ' twice: through the 1×1 bottleneck that feeds ' +
+      'the three convolutions, and through the max-pool branch.</div>';
+    html += '<div class="scrollx"><table class="mtab"><thead><tr><th>where</th><th>weight from this channel</th></tr></thead><tbody>';
+    for (let b = 0; b < m.B; b++) {
+      const w = m.bott.W[b * m.cin + ch];
+      html += '<tr><td class="ch">bottleneck b' + b + '</td><td style="color:' + wColor(w) + '">' + n3(w) + '</td></tr>';
+    }
+    for (let q = 0; q < m.f; q++) {
+      const w = m.poolConv.W[q * m.cin + ch];
+      html += '<tr><td class="ch">pool branch filter ' + (q + 1) + '</td><td style="color:' + wColor(w) + '">' + n3(w) + '</td></tr>';
+    }
+    return html + '</tbody></table></div>';
+  }
+  const d = model.dense, cls = activeClasses(), probs = model.probs;
+  let h = 0;
+  for (let tt = 0; tt < L; tt++) h += st.snapshot[ch * L + tt];
+  h /= L;
+  html += '<div class="formula">Global Average Pool: h[' + ch + '] = (sum of ' + L + ' values) / ' + L +
+    ' = <span class="res">' + n4(h) + '</span></div>';
+  html += '<div class="scrollx" style="margin-top:8px"><table class="mtab"><thead><tr><th>class</th>' +
+    '<th>weight to class</th><th>contribution</th><th>class bias</th><th>logit (total)</th><th>softmax</th></tr></thead><tbody>';
+  for (let k = 0; k < d.nout; k++) {
+    const w = d.W[k * d.nin + ch];
+    html += '<tr><td class="ch"><span class="chip" style="background:' + cls[k].color + '"></span> ' + cls[k].name +
+      '</td><td style="color:' + wColor(w) + '">' + n3(w) + '</td><td>' + n4(w * h) + '</td><td>' + n3(d.b[k]) +
+      '</td><td>' + n3(model.logits[k]) + '</td><td class="sum">' + (probs[k] * 100).toFixed(1) + '%</td></tr>';
+  }
+  return html + '</tbody></table></div>';
 }
 
 /* ------------------------------------------------------- MLP / KAN unit */
@@ -1735,6 +2089,7 @@ function renderInputMath(host, title, slider) {
 /** Human-readable name of whatever collapses the sequence before the linear layer. */
 function headName() {
   if (state.arch === 'mlp' || state.arch === 'kan') return 'the last hidden layer';
+  if (state.arch === 'resnet' || state.arch === 'inception') return 'Global Average Pool';
   if (state.arch === 'rnn') {
     return state.readout === 'mean' ? 'the mean over time'
       : state.readout === 'max' ? 'the max over time' : 'the last state';
@@ -1842,6 +2197,35 @@ function receptiveField(layerIdx) {
 function buildLayerControls() {
   const host = $('layerControls');
   host.innerHTML = '';
+  if (state.arch === 'resnet') {
+    state.resLayers.forEach((ls) => {
+      const card = document.createElement('div');
+      card.className = 'laycard';
+      card.innerHTML =
+        '<div class="row"><button data-a="m">−</button><b>' + ls.filters + '</b><button data-a="p">+</button></div>' +
+        '<div class="row"><select data-a="k">' + ['8-5-3', '7-5-3', '5-3', '3-3-3'].map((k) =>
+          '<option value="' + k + '"' + (k === ls.kernels ? ' selected' : '') + '>K ' + k + '</option>').join('') +
+        '</select></div>';
+      card.querySelector('[data-a=m]').onclick = () => { if (ls.filters > 2) { ls.filters--; rebuildModel(); } };
+      card.querySelector('[data-a=p]').onclick = () => { if (ls.filters < 10) { ls.filters++; rebuildModel(); } };
+      card.querySelector('[data-a=k]').onchange = (e) => { ls.kernels = e.target.value; rebuildModel(); };
+      host.appendChild(card);
+    });
+    return;
+  }
+  if (state.arch === 'inception') {
+    state.incLayers.forEach((ls) => {
+      const card = document.createElement('div');
+      card.className = 'laycard';
+      card.innerHTML =
+        '<div class="row"><button data-a="m">−</button><b>' + ls.filters + '</b><button data-a="p">+</button></div>' +
+        '<div class="row"><span style="font-size:10px;color:#7b8794">per branch × 4</span></div>';
+      card.querySelector('[data-a=m]').onclick = () => { if (ls.filters > 1) { ls.filters--; rebuildModel(); } };
+      card.querySelector('[data-a=p]').onclick = () => { if (ls.filters < 3) { ls.filters++; rebuildModel(); } };
+      host.appendChild(card);
+    });
+    return;
+  }
   if (state.arch === 'ssm' || state.arch === 'gnn' || state.arch === 'mlp' || state.arch === 'kan') {
     const what = state.arch === 'mlp' ? 'units' : state.arch === 'kan' ? 'nodes' : 'channels';
     archLayers().forEach((ls) => {
@@ -2164,6 +2548,10 @@ function renderWmPanel() {
       (model ? model.finalC : '—') + ' numbers per trigger — a linear head cannot memorise ' + wm.T +
       ' arbitrary label assignments. Measured: 8/20 matches with GAP against <b>20/20 with Flatten</b>. ' +
       'Switch the output head to <b>Flatten</b> to embed.</div>';
+  } else if (state.arch === 'resnet' || state.arch === 'inception') {
+    html += '<div class="verdict no" style="margin-top:8px">⚠ <b>This network ends in Global Average ' +
+      'Pooling</b>, leaving only ' + (model ? model.finalC : '—') + ' numbers per trigger — the same ' +
+      'bottleneck that keeps the GAP head of the 1D CNN at 8/20 matches. Expect the verification to stay low.</div>';
   }
   host.innerHTML = html;
 
@@ -2223,7 +2611,9 @@ function bindUI() {
     arr.push(state.arch === 'cnn'
       ? { filters: last.filters, kernel: last.kernel, pool: arr.length < 4 }
       : state.arch === 'rnn' ? { units: last.units, bidir: last.bidir }
-        : { units: last.units });
+        : state.arch === 'resnet' ? { filters: last.filters, kernels: last.kernels }
+          : state.arch === 'inception' ? { filters: last.filters }
+            : { units: last.units });
     rebuildModel(); evaluate(); renderMetrics();
   };
   $('layMinus').onclick = () => {
@@ -2233,12 +2623,13 @@ function bindUI() {
     rebuildModel(); evaluate(); renderMetrics();
   };
 
-  $('archCnn').onclick = () => setArch('cnn');
-  $('archRnn').onclick = () => setArch('rnn');
-  $('archSsm').onclick = () => setArch('ssm');
-  $('archGnn').onclick = () => setArch('gnn');
-  $('archMlp').onclick = () => setArch('mlp');
-  $('archKan').onclick = () => setArch('kan');
+  Object.entries(ARCH_TABS).forEach(([a, id]) => { $(id).onclick = () => setArch(a); });
+  $('skip').onchange = (e) => {
+    state.skip = e.target.checked; rebuildModel(); evaluate(); renderMetrics(); renderNet();
+  };
+  $('bn').onchange = (e) => {
+    state.bn = e.target.checked; rebuildModel(); evaluate(); renderMetrics(); renderNet();
+  };
   $('residual').onchange = (e) => {
     state.residual = e.target.checked; rebuildModel(); evaluate(); renderMetrics(); renderNet();
   };

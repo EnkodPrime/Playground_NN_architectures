@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NN Architecture Playground — power-line disturbances</title>
-<link rel="stylesheet" href="css/style.css?v=12">
+<link rel="stylesheet" href="css/style.css?v=17">
 </head>
 <body>
 
@@ -18,10 +18,12 @@
   </div>
   <nav class="archsw" role="tablist">
     <button id="archMlp" role="tab">MLP</button>
-    <button id="archCnn" class="on" role="tab">1D CNN Playground</button>
-    <button id="archRnn" role="tab">RNN Playground</button>
-    <button id="archSsm" role="tab">S4 / Mamba Playground</button>
-    <button id="archGnn" role="tab">GNN Playground</button>
+    <button id="archCnn" class="on" role="tab">1D CNN</button>
+    <button id="archRes" role="tab">ResNet-1D</button>
+    <button id="archInc" role="tab">InceptionTime</button>
+    <button id="archRnn" role="tab">RNN</button>
+    <button id="archSsm" role="tab">S4 / Mamba</button>
+    <button id="archGnn" role="tab">GNN</button>
     <button id="archKan" role="tab">KAN</button>
   </nav>
   <div class="epochbox">
@@ -90,8 +92,18 @@
     <input type="checkbox" id="causal"> causal (TCN)
   </label>
 
+  <label class="ctl deeponly inline" style="align-self:flex-end;padding-bottom:6px"
+         title="ResNet-1D: a skip around every block. InceptionTime: one shortcut around three modules.">
+    <input type="checkbox" id="skip" checked> skip connections
+  </label>
+
+  <label class="ctl deeponly inline" style="align-self:flex-end;padding-bottom:6px"
+         title="Normalise every convolution's output over its channels and positions (layer norm — the originals use batch norm, which needs a whole mini-batch)">
+    <input type="checkbox" id="bn" checked> layer norm
+  </label>
+
   <label class="ctl cnnonly inline" style="align-self:flex-end;padding-bottom:6px"
-         title="Add a skip y = f(x) + x around every layer after the first (ResNet)">
+         title="Add a skip y = f(x) + x around every layer after the first. For the full ResNet-1D, with normalisation, see its tab.">
     <input type="checkbox" id="residual"> residual (ResNet)
   </label>
 
@@ -207,6 +219,14 @@
       current example, and in the top-left corner the learned kernel itself. Link thickness is
       weight magnitude (<span class="sw pos"></span> positive, <span class="sw neg"></span>
       negative). Hover for a quick look, <b>click</b> a node for the full arithmetic below.</p>
+    <p class="hint resnetonly">Each column is one residual block — three convolutions (K = 8, 5, 3 by default),
+      layer norm after each, and a skip from the block input added before the last ReLU; each box is one output
+      channel's map. The dashed window is everything the block can see around t. <b>Click</b> a channel for the
+      block's cell — conv, norm, ReLU, skip — and the arithmetic below.</p>
+    <p class="hint inceptonly">Each column is one Inception module: a 1×1 bottleneck, three convolutions of
+      length 5, 11 and 23 side by side and a max-pool branch, stacked into one map, normalised and passed
+      through ReLU. The coloured tag on every box says which branch the channel comes from. <b>Click</b> a channel
+      to see all four branches at t; hover one for how strongly each branch responds to this example.</p>
     <p class="hint mlponly">Each box is one hidden unit. In the first layer it shows the unit's
       128 weights — one per sample, a fixed template laid over the window (<span class="sw pos"></span>
       positive, <span class="sw neg"></span> negative); deeper boxes show the weights from the units
@@ -426,6 +446,42 @@
 </section>
 
 <footer class="notes">
+  <h3 class="resnetonly">Things to try — ResNet-1D</h3>
+  <ul class="resnetonly">
+    <li><b>Normalisation is the big lever.</b> Build 3 blocks (9 convolutions), pick <i>4 classes</i>, run
+      20 epochs, and switch <i>layer norm</i> and <i>skip connections</i> on and off. In our runs (two
+      each): layer norm with skips 99–100%, layer norm without skips 96–97%, no normalisation 69–91%.
+      Without a norm, every ReLU block only adds, and the values grow from block to block.</li>
+    <li><b>Skips on top.</b> With layer norm on, the skips are worth a few more points at the end
+      (99–100% against 96–97%) — the difference the 1D CNN's residual toggle could not show without
+      normalisation.</li>
+    <li><b>Against the plain CNN.</b> After 20 epochs, two blocks of 6 channels reach 94–99% on four
+      classes where the 2×4 CNN is at 44–58%, and 55% on all eight classes where it is at 17%.</li>
+    <li><b>Why layer norm and not batch norm.</b> Batch norm needs a whole mini-batch at once; this
+      engine trains one example at a time. A batch norm that used running averages instead made
+      training worse (38–66%), so each map is normalised over its own channels and positions. Click a
+      channel: the cell diagram shows conv → LN → ReLU three times, and the skip joining before the
+      last ReLU; the table lists μ, σ, γ and β.</li>
+  </ul>
+
+  <h3 class="inceptonly">Things to try — InceptionTime</h3>
+  <ul class="inceptonly">
+    <li><b>Which branch answers?</b> Train on <i>All 8</i>, then hover a channel of module 1: the bars
+      show how strongly each branch responds to the current example. In our runs the long K=23 branch
+      was clearly the most active for <i>Harmonics</i> (0.48 against 0.31–0.36 for every other class)
+      — a kernel that long covers enough of the cycle to see the 3rd and 5th harmonic.</li>
+    <li><b>Four views at once.</b> Click a channel: the cell diagram shows the bottleneck, all four
+      branches with their value at t, and how the stacked map is normalised. Move t along the window
+      and watch the four values change.</li>
+    <li><b>A slow starter.</b> The loss can sit at ln 4 ≈ 1.39 — equal odds for every class — for
+      several epochs before it moves. On four classes, two modules reached 44–88% after 10 epochs and
+      up to 99% after 20, but about one run in five was still at 25%. If it has not moved after 10
+      epochs, press ⟳ for a fresh start; a faster learning rate does not help.</li>
+    <li><b>The shortcut.</b> With three modules the original adds one shortcut around all of them,
+      through a 1×1 convolution — the arc from the input to module 3. <i>Skip connections</i> turns it
+      off.</li>
+  </ul>
+
   <h3 class="mlponly">Things to try — MLP</h3>
   <ul class="mlponly">
     <li><b>Same task, no convolution.</b> Pick <i>Clean / Ripple</i> and run 60 epochs here and in the
@@ -535,25 +591,26 @@
       learns with Adam — the gradient reaching layer 1 is about as large with skips as without — and
       in our runs on four classes both reached 98–100% after 40 epochs with Tanh. With ReLU the skip
       adds a non-negative branch at every layer, so values grow with depth; residual ReLU stacks did
-      no better and at 12 layers worse, which is why real ResNets put batch normalisation in every
-      block. Skips earn their keep at dozens of layers.</li>
+      no better and at 12 layers worse, which is why real ResNets put a normalisation in every
+      block. The <b>ResNet-1D</b> tab has it, and there the skips do help.</li>
   </ul>
 </footer>
 
-<script src="js/signal.js?v=12"></script>
-<script src="js/fft.js?v=12"></script>
-<script src="js/nn.js?v=12"></script>
-<script src="js/rnn.js?v=12"></script>
-<script src="js/ssm.js?v=12"></script>
-<script src="js/gnn.js?v=12"></script>
-<script src="js/viz.js?v=12"></script>
-<script src="js/stream.js?v=12"></script>
-<script src="js/ood.js?v=12"></script>
-<script src="js/watermark.js?v=12"></script>
-<script src="js/mlp.js?v=12"></script>
-<script src="js/kan.js?v=12"></script>
-<script src="js/quant.js?v=12"></script>
-<script src="js/flow.js?v=12"></script>
-<script src="js/main.js?v=12"></script>
+<script src="js/signal.js?v=17"></script>
+<script src="js/fft.js?v=17"></script>
+<script src="js/nn.js?v=17"></script>
+<script src="js/rnn.js?v=17"></script>
+<script src="js/ssm.js?v=17"></script>
+<script src="js/gnn.js?v=17"></script>
+<script src="js/viz.js?v=17"></script>
+<script src="js/stream.js?v=17"></script>
+<script src="js/ood.js?v=17"></script>
+<script src="js/watermark.js?v=17"></script>
+<script src="js/mlp.js?v=17"></script>
+<script src="js/blocks.js?v=17"></script>
+<script src="js/kan.js?v=17"></script>
+<script src="js/quant.js?v=17"></script>
+<script src="js/flow.js?v=17"></script>
+<script src="js/main.js?v=17"></script>
 </body>
 </html>
