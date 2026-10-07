@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NN Architecture Playground — power-line disturbances</title>
-<link rel="stylesheet" href="css/style.css?v=9">
+<link rel="stylesheet" href="css/style.css?v=10">
 </head>
 <body>
 
@@ -169,6 +169,9 @@
     <p class="hint small">The test set is 40% of the training size and is generated separately.</p>
   </aside>
 
+  <div class="gutter" data-side="left" role="separator" aria-orientation="vertical" tabindex="0"
+       aria-label="Resize the Data column" title="Drag to resize · double-click to reset"></div>
+
   <!-- ========================== ARCHITECTURE ========================== -->
   <section class="panel center">
     <div class="centerhead">
@@ -185,6 +188,14 @@
       <div id="layerControls" class="layerctl"></div>
       <canvas id="net"></canvas>
     </div>
+    <div id="flowBox" class="flowbox">
+      <div class="flowhead">
+        <span id="flowTitle" class="flowtitle">Cell structure</span>
+        <label class="flowpos">Position <b id="flowTval">—</b>
+          <input type="range" id="flowTpos" min="0" max="127" value="64" disabled></label>
+      </div>
+      <div id="flowBody"></div>
+    </div>
     <p class="hint cnnonly">Each box is one filter — inside it is that filter's output map for the
       current example, and in the top-left corner the learned kernel itself. Link thickness is
       weight magnitude (<span class="sw pos"></span> positive, <span class="sw neg"></span>
@@ -195,6 +206,9 @@
       <span class="sw neg"></span> negative). With a bidirectional layer, → units read the window
       forwards and ← units backwards. <b>Click</b> a unit for the step-by-step recurrence below.</p>
   </section>
+
+  <div class="gutter" data-side="right" role="separator" aria-orientation="vertical" tabindex="0"
+       aria-label="Resize the Results column" title="Drag to resize · double-click to reset"></div>
 
   <!-- ============================ RESULTS ============================ -->
   <aside class="panel">
@@ -467,18 +481,18 @@
   </ul>
 </footer>
 
-<script src="js/signal.js?v=9"></script>
-<script src="js/fft.js?v=9"></script>
-<script src="js/nn.js?v=9"></script>
-<script src="js/rnn.js?v=9"></script>
-<script src="js/ssm.js?v=9"></script>
-<script src="js/gnn.js?v=9"></script>
-<script src="js/viz.js?v=9"></script>
-<script src="js/stream.js?v=9"></script>
-<script src="js/ood.js?v=9"></script>
-<script src="js/watermark.js?v=9"></script>
-<script src="js/quant.js?v=9"></script>
-<script src="js/flow.js?v=9"></script>
-<script src="js/main.js?v=9"></script>
+<script src="js/signal.js?v=10"></script>
+<script src="js/fft.js?v=10"></script>
+<script src="js/nn.js?v=10"></script>
+<script src="js/rnn.js?v=10"></script>
+<script src="js/ssm.js?v=10"></script>
+<script src="js/gnn.js?v=10"></script>
+<script src="js/viz.js?v=10"></script>
+<script src="js/stream.js?v=10"></script>
+<script src="js/ood.js?v=10"></script>
+<script src="js/watermark.js?v=10"></script>
+<script src="js/quant.js?v=10"></script>
+<script src="js/flow.js?v=10"></script>
+<script src="js/main.js?v=10"></script>
 </body>
 </html>

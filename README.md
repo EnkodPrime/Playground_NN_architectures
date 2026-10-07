@@ -109,15 +109,20 @@ pooling comparison. For a recurrent unit: what each gate computes at step t, the
 those sums, and the state update — `c = f·c + i·g` for LSTM, `h = (1−z)·n + z·h` for GRU. Both end
 with the contribution to each class logit; clicking the output expands softmax and the loss.
 
-**Data-flow diagram.** Above the tables, the selected node is drawn as a block diagram of its
-cell — gate boxes, multiply and add nodes, wires with arrows — with the value that flows along
+**Data-flow diagram.** Clicking a neuron draws its cell right under the network, inside the
+Architecture frame, as a block diagram — gate boxes, multiply and add nodes, wires with arrows — with the value that flows along
 every wire at the current step: the LSTM cell with its memory line and four gates, the GRU with
 its reset and update gates, the plain tanh RNN, the convolution window feeding Σ, bias,
 activation and pooling, the S4D / Mamba recurrence with its feedback through Ā and the D skip
 (and, for Mamba, Δ(t) steering Ā and B̄ and the gate branch), message passing in the GNN, and
 the output head from the last maps to the class probabilities. Hovering a block shows its
 formula with the current numbers filled in, so every value can be traced back to where it came
-from.
+from. A slider next to the diagram moves the step t; the full tables stay in the arithmetic panel
+further down.
+
+**Layout.** The dividers between Data, Architecture and Results can be dragged (or moved with
+the arrow keys) to give the network more room; a double click puts the default back, and the
+widths are remembered in the browser.
 
 **Live stream.** A continuously generated signal flows through a ring buffer; the most recent
 128 samples are classified on every frame. Disturbances are toggled on the fly, a scope shows

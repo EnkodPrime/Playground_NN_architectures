@@ -733,10 +733,39 @@ function renderMath(force) {
   const host = $('mathBody');
   // keep the scroll positions of the wide tables
   const scrolls = [...host.querySelectorAll('.scrollx')].map((e) => [e.scrollLeft, e.scrollTop]);
+  flowHtml = '';
   renderMathInner(host);
   [...host.querySelectorAll('.scrollx')].forEach((e, i) => {
     if (scrolls[i]) { e.scrollLeft = scrolls[i][0]; e.scrollTop = scrolls[i][1]; }
   });
+  renderFlowBox();
+}
+
+/* ------------------------------------------- cell diagram under the network */
+let flowHtml = '';        // filled by the renderer of the selected node
+let flowShown = null;     // what the box holds now, so an unchanged diagram is not rebuilt
+
+/** Hands the selected node's data-flow diagram to the Architecture frame. */
+function setFlow(svgHtml) { flowHtml = svgHtml; }
+
+/**
+ * The diagram lives under the network, so clicking a neuron shows its structure
+ * right where it was clicked. Its header mirrors the arithmetic panel: the same
+ * title, and a second slider bound to the same position t.
+ */
+function renderFlowBox() {
+  const body = $('flowBody');
+  const html = flowHtml || '<p class="flowempty">Click any neuron in the diagram above to see ' +
+    'its cell — every gate, weight and value on the way from its inputs to its output. ' +
+    'The full arithmetic is listed further down the page.</p>';
+  // rebuilding an identical SVG would only drop the tooltip under the mouse
+  if (html !== flowShown) { body.innerHTML = html; flowShown = html; }
+  $('flowTitle').textContent = flowHtml ? $('mathTitle').textContent : 'Cell structure';
+  const main = $('tpos'), mini = $('flowTpos');
+  mini.disabled = main.disabled || !flowHtml;
+  mini.max = main.max;
+  mini.value = main.value;
+  $('flowTval').textContent = mini.disabled ? '—' : $('tposVal').textContent;
 }
 
 function renderMathInner(host) {
@@ -787,7 +816,8 @@ function renderUnitMath(host, title, slider, sel) {
     ' · ' + d.kind.toUpperCase() + dirTxt;
 
   const gates = GATE_NAMES[d.kind];
-  let html = '<h4>How the numbers flow</h4>' + Flow[d.kind](d);
+  setFlow(Flow[d.kind](d));
+  let html = '';
 
   /* --- 1. the recurrence --- */
   const formulas = {
@@ -894,11 +924,11 @@ function renderGnnMath(host, title, slider, sel) {
 
   let fSelf = 0, fNeigh = 0;
   for (let i = 0; i < d.D; i++) { fSelf += d.ws[i] * d.self[i]; fNeigh += d.wn[i] * d.agg[i]; }
-  let html = '<h4>How the numbers flow</h4>' + Flow.gnn(d, {
+  setFlow(Flow.gnn(d, {
     li, ch, fname, sSelf: fSelf, sNeigh: fNeigh,
     src: li === 0 ? model.feat : model.stages[li - 1].snapshot, L: WIN,
-  });
-  html += '<h4>1 · The graph</h4>';
+  }));
+  let html = '<h4>1 · The graph</h4>';
   html += '<div class="formula">Two samples i &lt; j are neighbours when every sample between ' +
     'them is lower than both — a horizontal visibility graph. Nothing is learned here; the ' +
     'topology is a function of the waveform.</div>';
@@ -977,12 +1007,12 @@ function renderSsmMath(host, title, slider, sel) {
   let fy = 0;
   for (const m of d.modes) fy += isS4 ? 2 * (m.cRe * m.xRe - m.cIm * m.xIm) : m.C * m.xRe;
   const lay = st.layer, at = ch * lay.L + t;
-  let html = '<h4>How the numbers flow</h4>' + Flow.ssm(d, {
+  setFlow(Flow.ssm(d, {
     ch, ySum: fy, y: fy + d.Dskip * d.u,
     out: st.snapshot ? st.snapshot[ch * st.L + t] : 0,
     gate: lay.g ? lay.g[at] : null,
-  });
-  html += '<h4>1 · The state space model</h4>';
+  }));
+  let html = '<h4>1 · The state space model</h4>';
   html += '<div class="formula">x<sub>k</sub> = Ā ⊙ x<sub>k−1</sub> + B̄ u<sub>k</sub>' +
     ' &nbsp;&nbsp; y<sub>k</sub> = ' + (isS4 ? '2·Re( Σ<sub>n</sub> C<sub>n</sub> x<sub>k,n</sub> )'
       : 'Σ<sub>n</sub> C<sub>n</sub>(t) x<sub>k,n</sub>') + ' + D·u<sub>k</sub><br>' +
@@ -1154,9 +1184,10 @@ function renderFilterMath(host, title, slider, sel) {
     const v1 = even + 1 < Lin ? filterValueAt(li, ch, even + 1) : -Infinity;
     pool = { even, v0, v1, out: Math.max(v0, v1), tp: even >> 1 };
   }
-  let html = '<h4>How the numbers flow</h4>' + Flow.conv(c, {
+  setFlow(Flow.conv(c, {
     t, li, ch, a, pool, act: state.activation, actName: ACT_NAMES[state.activation], actExpr: actExpr(c.z),
-  });
+  }));
+  let html = '';
 
   /* --- 1. convolution --- */
   html += '<h4>1 · Convolution (Conv1D, kernel K=' + c.K + ', "same" padding)</h4>';
@@ -1326,7 +1357,7 @@ function renderInputMath(host, title, slider) {
   for (let i = 0; i < WIN; i++) { rms += x[i] * x[i]; mean += x[i]; mn = Math.min(mn, x[i]); mx = Math.max(mx, x[i]); }
   rms = Math.sqrt(rms / WIN); mean /= WIN;
 
-  const st = model.stages[0], K = st.conv.k, pad = st.conv.pad;
+  const st = model.stages[0];
   let html = '<h4>The raw input</h4>';
   html += '<div class="formula">x — ' + WIN + ' samples at ' + SR + ' Hz (' +
     (WIN / SR * 1000).toFixed(0) + ' ms). No normalisation: these are amplitudes as the ADC ' +
@@ -1335,6 +1366,17 @@ function renderInputMath(host, title, slider) {
     '   min = <b>' + n3(mn) + '</b>   max = <b>' + n3(mx) + '</b>   mean = <b>' + n3(mean) + '</b>' +
     '   <span class="op">(a clean sine has RMS ≈ 0.707)</span></div>';
 
+  if (!st.conv) {
+    // recurrent, state-space and graph layers have no kernel window: they read one sample per step
+    html += '<h4>What layer 1 reads at t = ' + t + '</h4>';
+    html += '<div class="formula">x[' + t + '] = <b>' + n4(x[t]) + '</b>   <span class="op">' +
+      (model.kind === 'gnn'
+        ? '— node ' + t + ' of the visibility graph; layer 1 also gets Δx and |x| at every node'
+        : '— one sample per step; click a unit to follow it through its cell') + '</span></div>';
+    host.innerHTML = html;
+    return;
+  }
+  const K = st.conv.k, pad = st.conv.pad;
   html += '<h4>The window one kernel sees at t = ' + t + '</h4>';
   html += '<div class="scrollx"><table class="mtab"><thead><tr><th>index</th>';
   for (let j = 0; j < K; j++) html += '<th>' + (t + j - pad) + '</th>';
@@ -1380,14 +1422,14 @@ function renderOutputMath(host, title, slider) {
   const last = model.stages[model.stages.length - 1];
   const HEAD_LABELS = { gap: 'GAP', gmp: 'GMP', flat: 'Flatten', mean: 'mean over t', max: 'max over t', last: 'last step' };
   const flat = hk === 'flat';
-  let html = '<h4>How the numbers flow</h4>' + Flow.output({
+  setFlow(Flow.output({
     C: last.C, L: last.L, head: hk, headLabel: HEAD_LABELS[hk] || hk,
     headTip: headName() + (flat ? ' — keeps all ' + last.C * last.L + ' numbers, position included'
       : ' — one number per map'),
     emb: !flat && model.embedding ? Array.from(model.embedding) : null,
     z: Array.from(z), p: Array.from(p), cls, trueIdx: probeInfo().trained ? state.probeLabel : -1,
-  });
-  html += '<h4>1 · Linear layer</h4>';
+  }));
+  let html = '<h4>1 · Linear layer</h4>';
   html += '<div class="formula">logit<sub>j</sub> = <span class="op">Σ</span><sub>c=0..' +
     (d.nin - 1) + '</sub> W[j][c] · h[c] + b[j]' +
     '   <span class="op">(h is the output of ' + headName() +
@@ -2087,13 +2129,102 @@ function bindUI() {
     }
     state.selected = hit;
     renderNet(); renderMath(true);
-    $('mathPanel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    $('flowBox').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   });
 
   $('tpos').oninput = (e) => { state.tPos = +e.target.value; renderNet(); renderMath(true); };
+  $('flowTpos').oninput = (e) => { state.tPos = +e.target.value; renderNet(); renderMath(true); };
   $('btnClearSel').onclick = () => { state.selected = null; renderNet(); renderMath(true); };
 
   window.addEventListener('resize', () => { renderNet(); renderMetrics(); });
+  bindGutters();
+}
+
+/* ------------------------------------------------- resizable columns */
+const COLS = { left: 240, right: 280 };                 // default widths, px
+const COL_LIMITS = { left: [190, 400], right: [230, 440] };
+const CENTER_MIN = 520;
+
+/** Applies the column widths, keeping the Architecture frame at least CENTER_MIN wide. */
+function applyCols(cols) {
+  const grid = document.querySelector('main.grid');
+  const room = grid.clientWidth - 40 - 28 - CENTER_MIN;  // side padding, two gutters
+  const fit = (side, v) => Math.round(Math.max(COL_LIMITS[side][0], Math.min(COL_LIMITS[side][1], v)));
+  let l = fit('left', cols.left), r = fit('right', cols.right);
+  if (l + r > room) {                                    // a narrow window: the sides give way
+    const over = l + r - room;
+    const take = Math.min(over, r - COL_LIMITS.right[0]);
+    r -= take;
+    l = Math.max(COL_LIMITS.left[0], l - (over - take));
+  }
+  grid.style.setProperty('--colL', l + 'px');
+  grid.style.setProperty('--colR', r + 'px');
+  return { left: l, right: r };
+}
+
+/**
+ * Drag a gutter to trade width between Data, Architecture and Results; arrow
+ * keys nudge it and a double click puts the default back. The widths are
+ * remembered in this browser only.
+ */
+function bindGutters() {
+  // `want` is what the reader chose; `cols` is what fits the window right now
+  let want = { ...COLS };
+  try {
+    const saved = JSON.parse(localStorage.getItem('pgCols') || 'null');
+    if (saved && saved.left && saved.right) want = saved;
+  } catch (_) { /* storage blocked: keep the defaults */ }
+  let cols = applyCols(want);
+
+  let pending = false;
+  const redraw = () => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => { pending = false; renderNet(); renderMetrics(); });
+  };
+  const save = () => {
+    try { localStorage.setItem('pgCols', JSON.stringify(want)); } catch (_) { /* not remembered */ }
+  };
+  const set = (side, v) => {
+    cols = applyCols({ ...cols, [side]: v });
+    want = { ...want, [side]: cols[side] };
+    redraw();
+  };
+
+  document.querySelectorAll('.gutter').forEach((g) => {
+    const side = g.dataset.side;
+    g.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      g.setPointerCapture(ev.pointerId);
+      g.classList.add('drag');
+      document.body.classList.add('resizing');
+      const x0 = ev.clientX, w0 = cols[side];
+      const move = (e) => set(side, side === 'left' ? w0 + (e.clientX - x0) : w0 - (e.clientX - x0));
+      const up = () => {
+        g.removeEventListener('pointermove', move);
+        g.removeEventListener('pointerup', up);
+        g.removeEventListener('pointercancel', up);
+        g.classList.remove('drag');
+        document.body.classList.remove('resizing');
+        save();
+      };
+      g.addEventListener('pointermove', move);
+      g.addEventListener('pointerup', up);
+      g.addEventListener('pointercancel', up);
+    });
+    g.addEventListener('dblclick', () => { set(side, COLS[side]); save(); });
+    g.addEventListener('keydown', (ev) => {
+      const step = ev.shiftKey ? 40 : 10;
+      const grow = side === 'left' ? 'ArrowRight' : 'ArrowLeft';
+      const shrink = side === 'left' ? 'ArrowLeft' : 'ArrowRight';
+      if (ev.key === grow) set(side, cols[side] + step);
+      else if (ev.key === shrink) set(side, cols[side] - step);
+      else return;
+      ev.preventDefault();
+      save();
+    });
+  });
+  window.addEventListener('resize', () => { cols = applyCols(want); redraw(); });
 }
 
 /* --------------------------------------------------------------- boot */
@@ -2110,6 +2241,7 @@ function init() {
   renderWmPanel();
   renderQuantPanel();
   renderNet();
+  renderMath(true);       // the throttle would otherwise skip the very first frame
   requestAnimationFrame(loop);
 }
 
