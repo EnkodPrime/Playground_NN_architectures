@@ -4,13 +4,15 @@ An interactive playground for neural network architectures on **signals**, in th
 [TensorFlow Playground](https://playground.tensorflow.org/) but for time series instead of 2D
 points. The task is recognising power-quality disturbances in 50 Hz mains voltage.
 
-Three architectures share the same data, metrics and tooling, switchable at the top of the page:
+Six architectures share the same data, metrics and tooling, switchable at the top of the page:
 
-* **1D CNN** — convolutional filters over the window
+* **MLP** — fully connected layers over the raw window, the baseline with no structure at all
+* **1D CNN** — convolutional filters over the window, optionally with residual (ResNet) skips
 * **RNN** — recurrent cells over the same window: simple tanh RNN, GRU or LSTM
 * **S4 / Mamba** — state space models: S4D (diagonal, time-invariant) and a Mamba-style
   selective SSM
 * **GNN** — message passing over the visibility graph the signal builds for itself
+* **KAN** — a Kolmogorov–Arnold network: a learned function on every edge instead of a weight
 
 Everything runs in the browser. No dependencies, no build step, no server.
 
@@ -52,9 +54,22 @@ generated separately at 40% of the training size.
 
 ## The networks
 
-**Convolutional.** 1–4 layers (`same` padding, stride 1), 1–10 filters each, kernel
+**MLP.** 1–3 dense layers of 1–10 units over all 128 samples, with the same activations as the
+convolutional net. A first-layer unit has one weight per sample: a template fixed to positions in
+the window, which the diagram draws inside its box. Nothing is shared across positions, and that
+is the point of the comparison — on *Clean / Ripple* a 118-parameter CNN reaches about 99% test
+accuracy in 60 epochs, while an 8-unit MLP with 1,050 parameters stays near chance and, trained
+longer, memorises the training windows (above 90% training accuracy, 60–70% test).
+
+**Convolutional.** 1–8 layers (`same` padding, stride 1), 1–10 filters each, kernel
 K ∈ {3,5,7,9,11}, optional max-pooling ×2; ReLU / Tanh / Leaky ReLU / Abs activation;
-a Global Average Pool, Global Max Pool or Flatten head.
+a Global Average Pool, Global Max Pool or Flatten head. With **residual (ResNet)** on, every
+layer after the first becomes a residual block (y = act(conv(x)) + x, so the identity path is untouched); when the channel count changes, the
+skip is a learned 1×1 convolution. The diagram draws the skips as arcs under the columns. At
+the depths offered here (up to 8 layers) the plain stack still trains with Adam and the gradient
+at layer 1 is about as large without skips as with them, so the toggle shows the structure more
+than an accuracy gain; with ReLU the non-negative branch makes values grow with depth, which is
+what batch normalisation fixes in real ResNets.
 
 **Recurrent.** 1–2 layers, 1–10 units each, optionally bidirectional; simple tanh RNN, GRU or
 LSTM cell; readout by last state, mean over time or max over time. Trained by backpropagation
@@ -73,6 +88,14 @@ model is no longer time-invariant and has no fixed kernel; the inspector shows �
 block also carries the short causal depthwise convolution and the SiLU gate branch of the original,
 without which a real-diagonal state is only a running average and cannot resolve a frequency.
 
+**KAN.** 1–3 Kolmogorov–Arnold layers of 1–10 nodes, then a linear layer to the classes. Every
+edge carries φ(x) = w_b·silu(x) + Σ c_m·B_m(x), with cubic B-splines on 5 grid intervals over
+−2 … 2 — nine numbers per edge — and the node only sums its edges. Deeper layers read their
+inputs standardised with running statistics, a simple form of the paper's grid update: a node
+summing 128 edges easily reaches ±40, far outside the grid where every spline is zero. The
+diagram draws each learned edge function with the current input marked on it. On raw samples
+the KAN shares the MLP's weakness and overfits harder (4,608 first-layer parameters).
+
 **Graph.** A single window comes with no graph, so one is derived from it: in a horizontal
 visibility graph two samples are connected when everything between them is lower than both
 (Luque et al. 2009). Shape becomes topology — a clean sine yields an almost regular graph with
@@ -81,9 +104,10 @@ value, its step difference and its magnitude; 1–3 message passing layers then 
 neighbours by mean, max or sum. The inspector draws the graph as an arc diagram above the signal.
 
 All of them feed a linear layer and softmax, and are trained with **Adam** and cross-entropy plus
-optional L2. Forward and backward passes are written from scratch in `js/nn.js`, `js/rnn.js` and
-`js/ssm.js` — convolution, pooling, three recurrent cells, both state space variants, dense layer
-and softmax, all over flat `Float32Array`s indexed as `[channel * length + t]`. Every gradient,
+optional L2. Forward and backward passes are written from scratch in `js/nn.js`, `js/rnn.js`,
+`js/ssm.js`, `js/mlp.js` and `js/kan.js` — convolution, residual blocks, pooling, three recurrent
+cells, both state space variants, B-spline edges, dense layer and softmax, all over flat
+`Float32Array`s indexed as `[channel * length + t]`. Every gradient,
 including the complex chain rule through `Ā` and `B̄`, agrees with numeric finite differences to
 within 1% at the full sequence length.
 
@@ -152,10 +176,12 @@ binomial test. Includes pruning and fine-tuning attacks to see how much of it su
 |---|---|
 | `js/signal.js` | signal and dataset generation |
 | `js/fft.js` | radix-2 FFT, spectra and kernel frequency response |
-| `js/nn.js` | convolutional layers, forward/backprop, Adam, evaluation |
+| `js/nn.js` | convolutional layers, residual blocks, forward/backprop, Adam, evaluation |
 | `js/rnn.js` | RNN / GRU / LSTM cells, BPTT, gradient clipping, readouts |
 | `js/ssm.js` | S4D and selective (Mamba) state space layers, kernel extraction |
 | `js/gnn.js` | visibility graph construction, message passing, arc diagram |
+| `js/mlp.js` | multilayer perceptron over the raw window |
+| `js/kan.js` | Kolmogorov–Arnold layers: B-spline edges, running grid statistics |
 | `js/viz.js` | layout and canvas drawing |
 | `js/stream.js` | live generator, scope and decision ribbon |
 | `js/ood.js` | novelty scores, calibration, AUC, histograms |

@@ -41,10 +41,20 @@ h3{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--mute
 }
 .archsw button:hover{color:#fff}
 .archsw button.on{background:#fff;color:#2f3f4f}
-body.arch-cnn .rnnonly, body.arch-cnn .ssmonly, body.arch-cnn .gnnonly, body.arch-cnn .seqonly{display:none !important}
-body.arch-rnn .cnnonly, body.arch-rnn .ssmonly, body.arch-rnn .gnnonly{display:none !important}
-body.arch-ssm .cnnonly, body.arch-ssm .rnnonly, body.arch-ssm .gnnonly{display:none !important}
-body.arch-gnn .cnnonly, body.arch-gnn .rnnonly, body.arch-gnn .ssmonly{display:none !important}
+body.arch-cnn .rnnonly, body.arch-cnn .ssmonly, body.arch-cnn .gnnonly, body.arch-cnn .seqonly,
+body.arch-cnn .mlponly, body.arch-cnn .kanonly{display:none !important}
+body.arch-rnn .cnnonly, body.arch-rnn .ssmonly, body.arch-rnn .gnnonly,
+body.arch-rnn .mlponly, body.arch-rnn .kanonly{display:none !important}
+body.arch-ssm .cnnonly, body.arch-ssm .rnnonly, body.arch-ssm .gnnonly,
+body.arch-ssm .mlponly, body.arch-ssm .kanonly{display:none !important}
+body.arch-gnn .cnnonly, body.arch-gnn .rnnonly, body.arch-gnn .ssmonly,
+body.arch-gnn .mlponly, body.arch-gnn .kanonly{display:none !important}
+body.arch-mlp .cnnonly, body.arch-mlp .rnnonly, body.arch-mlp .ssmonly, body.arch-mlp .gnnonly,
+body.arch-mlp .seqonly, body.arch-mlp .kanonly{display:none !important}
+body.arch-kan .cnnonly, body.arch-kan .rnnonly, body.arch-kan .ssmonly, body.arch-kan .gnnonly,
+body.arch-kan .seqonly, body.arch-kan .mlponly{display:none !important}
+/* the activation choice applies to the convolutional and the dense playground */
+body.arch-rnn .actctl, body.arch-ssm .actctl, body.arch-gnn .actctl, body.arch-kan .actctl{display:none !important}
 .epochbox{text-align:right}
 .epochbox .lbl{display:block;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#9fb0be}
 .epochbox .val{font:600 20px ui-monospace,Consolas,monospace}

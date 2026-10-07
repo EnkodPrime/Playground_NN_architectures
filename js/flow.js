@@ -363,7 +363,7 @@ const Flow = (() => {
     const K = c.K, rows = Math.min(c.cin, 6), more = c.cin - rows;
     const cw = 44, cg = 4, x0 = 40, top = 100, rh = 50;
     const gridR = x0 + K * (cw + cg);
-    const H = Math.max(240, top + rows * rh + (more ? 26 : 0) + 40);
+    let H = Math.max(240, top + rows * rh + (more ? 26 : 0) + 40);
     const midY = top + (rows * rh) / 2 - 8;
     const SX = gridR + 120;                       // big Σ
     let s = '';
@@ -408,23 +408,224 @@ const Flow = (() => {
     x += 106;
     s += gate(x, midY, o.actName, o.a, { w: 78, tip: o.actExpr + '  →  a = ' + num(o.a, 4) +
       (o.a === 0 && o.act === 'relu' ? '\nThe filter is silent here.' : '') });
+    let carry = o.a;                 // what leaves the block: a, or a + skip in a residual block
+    if (o.skip) {
+      const sk = o.skip;
+      const rowsBottom = top + (rows - 1) * rh + 36 + (more ? 26 : 0);
+      const yS = rowsBottom + 26;
+      s += wire([[x + 40, midY], [x + 78, midY]]);
+      x += 92;
+      carry = o.a + sk.s;
+      s += op(x, midY, '+', { tip: 'residual: y = a + skip = ' + num(o.a, 4) + ' + ' + num(sk.s, 4) + ' = ' + num(carry, 4) });
+      // the skip leaves the block input and rejoins after the activation
+      s += wire([[x0 + 10, rowsBottom + 2], [x0 + 10, yS], [x, yS], [x, midY + 14]], { color: BLUE, dash: true });
+      const mx = (x0 + x) / 2;
+      if (sk.proj) {
+        s += wbox(mx - 50, yS, '1×1 conv', { w: 74, tip: 'skip = Σ_c P[' + o.ch + '][c] · x[c][' + o.t + '] + b_P = ' + num(sk.s, 4) +
+          '\nThe channel count changes here, so the skip needs a learned 1×1 convolution.' });
+        s += pill(mx + 50, yS, 'skip', sk.s, { tip: 'the projected block input at t = ' + o.t });
+      } else {
+        s += pill(mx, yS, 'skip', sk.s, { tip: 'x[' + o.ch + '][' + o.t + '] — the same channel of the block input, passed on untouched' });
+      }
+      s += txt(x0 + 16, yS - 8, 'skip connection', { size: 10.5, color: BLUE, anchor: 'start' });
+      H = Math.max(H, yS + 30);
+      // the + node is narrower than a block, so close the gap to where the next wire starts
+      s += wire([[x + 14, midY], [x + 40, midY]], { arrow: false });
+    }
+    const nm = o.skip ? 'y' : 'a';
     if (o.pool) {
       const p = o.pool;
       s += wire([[x + 40, midY], [x + 92, midY]]);
       x += 132;
-      s += gate(x, midY, 'max ×2', p.out, { w: 78, fill: '#3d7cc0', tip: 'out[' + p.tp + '] = max( a[' + p.even + '] = ' + num(p.v0) +
-        ' , a[' + (p.even + 1) + '] = ' + num(p.v1) + ' ) = ' + num(p.out, 4) });
+      s += gate(x, midY, 'max ×2', p.out, { w: 78, fill: '#3d7cc0', tip: 'out[' + p.tp + '] = max( ' + nm + '[' + p.even + '] = ' + num(p.v0) +
+        ' , ' + nm + '[' + (p.even + 1) + '] = ' + num(p.v1) + ' ) = ' + num(p.out, 4) });
       s += wire([[x, midY + 92], [x, midY + 23]]);
-      s += pill(x, midY + 72, 'a[' + (o.t === p.even ? p.even + 1 : p.even) + ']',
+      s += pill(x, midY + 72, nm + '[' + (o.t === p.even ? p.even + 1 : p.even) + ']',
         o.t === p.even ? p.v1 : p.v0, { tip: 'the neighbouring position the pool compares with' });
-      s += pill(x - 66, midY - 22, 'a', o.a);
+      s += pill(x - 66, midY - 22, nm, carry);
     }
     s += wire([[x + 40, midY], [x + 92, midY]]);
-    s += pill(x + 66, midY - 22, '', o.pool ? o.pool.out : o.a, { tip: 'the value drawn in this filter\'s map' });
+    s += pill(x + 66, midY - 22, '', o.pool ? o.pool.out : carry, { tip: 'the value drawn in this filter\'s map' });
     s += txt(x + 98, midY + 5, 'out[' + (o.pool ? o.pool.tp : o.t) + ']', { size: 14, weight: 600, anchor: 'start' });
     const W = x + 160;
     s += txt(x0, 62, 'kernel window over the input — each cell is value × weight', { size: 11, color: MUTED, anchor: 'start' });
     return svg(W, H, s, 'Filter ' + (o.ch + 1) + ' of layer ' + (o.li + 1) + ' at position t = ' + o.t + '.');
+  }
+
+  /* ------------------------------------------------------ dense unit (MLP) */
+  /** Inputs to show as rows: the strongest contributions, and position t in the first layer. */
+  function pickRows(n, score, t, k) {
+    if (n <= k) return Array.from({ length: n }, (_, i) => i);
+    const idx = Array.from({ length: n }, (_, i) => i).sort((a, b) => score(b) - score(a)).slice(0, k);
+    if (t != null && !idx.includes(t)) { idx.pop(); idx.push(t); }
+    return idx.sort((a, b) => a - b);
+  }
+
+  /** The window with a second curve over it: the weights of a unit, or its edge outputs. */
+  function strip(y, h, vals, sig, t, cap) {
+    const x0 = 40, w = 860, n = vals.length;
+    let m = 1e-9, ms = 1e-9;
+    for (let i = 0; i < n; i++) { m = Math.max(m, Math.abs(vals[i])); ms = Math.max(ms, Math.abs(sig[i])); }
+    const X = (i) => x0 + i * w / (n - 1);
+    let s = '<rect x="' + x0 + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="6" fill="#fff" stroke="#c9d6e6"/>';
+    s += '<line x1="' + x0 + '" x2="' + (x0 + w) + '" y1="' + (y + h / 2) + '" y2="' + (y + h / 2) + '" stroke="#dfe4ea"/>';
+    let ps = '', pv = '';
+    for (let i = 0; i < n; i++) {
+      ps += (i ? 'L' : 'M') + X(i).toFixed(1) + ' ' + (y + h / 2 - sig[i] / ms * (h / 2 - 4)).toFixed(1);
+    }
+    s += '<path d="' + ps + '" fill="none" stroke="#b6c0ca" stroke-width="1.2"/>';
+    for (let i = 0; i < n; i++) {
+      const Y = y + h / 2 - vals[i] / m * (h / 2 - 4);
+      pv += '<line x1="' + X(i).toFixed(1) + '" x2="' + X(i).toFixed(1) + '" y1="' + (y + h / 2) + '" y2="' + Y.toFixed(1) +
+        '" stroke="' + (vals[i] >= 0 ? POS : NEG) + '" stroke-width="2.4"/>';
+    }
+    s += pv;
+    if (t != null) {
+      s += '<rect x="' + (X(t) - 3) + '" y="' + (y + 1) + '" width="6" height="' + (h - 2) + '" fill="rgba(29,78,216,0.22)"/>';
+      s += txt(X(t), y + h + 13, 't = ' + t, { size: 10, color: BLUE, mono: true });
+    }
+    s += txt(x0, y - 8, cap, { size: 11, color: MUTED, anchor: 'start' });
+    return s;
+  }
+
+  /**
+   * @param d  { x, w, b, z, a, nin }   one MLP unit
+   * @param o  { li, ch, t, act, actName, actExpr, name(i) }
+   */
+  function dense(d, o) {
+    let s = '';
+    const first = o.li === 0;
+    const prod = (i) => d.w[i] * d.x[i];
+    const rowsIdx = pickRows(d.nin, (i) => Math.abs(prod(i)), first ? o.t : null, 7);
+    let shownSum = 0;
+    rowsIdx.forEach((i) => { shownSum += prod(i); });
+    const rest = d.nin - rowsIdx.length;
+    let total = 0;
+    for (let i = 0; i < d.nin; i++) total += prod(i);
+
+    let top = 40;
+    if (first) {
+      s += strip(36, 70, d.w, d.x, o.t, 'this unit\'s ' + d.nin + ' weights over the window (colour) — the input in grey');
+      top = 150;
+    }
+    const rh = 38, nRows = rowsIdx.length + (rest ? 1 : 0);
+    const midY = top + (nRows - 1) * rh / 2;
+    const SX = 470;
+    rowsIdx.forEach((i, r) => {
+      const y = top + r * rh;
+      const hot = first && i === o.t;
+      s += '<g class="blk">' + tip(o.name(i) + ' = ' + num(d.x[i], 4) + '\nweight w[' + i + '] = ' + num(d.w[i], 4) +
+        '\nproduct = ' + num(prod(i), 4)) +
+        '<rect x="40" y="' + (y - 14) + '" width="250" height="28" rx="5" fill="' + (hot ? '#e8f0fc' : '#fff') +
+        '" stroke="' + (hot ? BLUE : '#c9d6e6') + '"/>' +
+        txt(50, y + 4, o.name(i) + ' = ' + num(d.x[i]), { size: 11, mono: true, anchor: 'start', color: '#5b6873' }) +
+        txt(280, y + 4, '× ' + num(d.w[i]), { size: 11, mono: true, anchor: 'end', color: signColor(d.w[i]), weight: 600 }) + '</g>';
+      s += wire([[290, y], [330, y]], { arrow: false });
+      s += pill(370, y, '', prod(i));
+      s += wire([[408, y], [SX - 14, midY]], { color: '#8796a6', width: 1 });
+    });
+    if (rest) {
+      const y = top + rowsIdx.length * rh;
+      s += '<g class="blk">' + tip('the other ' + rest + ' products, summed') +
+        '<rect x="40" y="' + (y - 14) + '" width="250" height="28" rx="5" fill="#f7f9fb" stroke="#dfe4ea" stroke-dasharray="3 3"/>' +
+        txt(50, y + 4, '+ ' + rest + ' more inputs', { size: 11, anchor: 'start', color: MUTED }) + '</g>';
+      s += wire([[290, y], [330, y]], { arrow: false });
+      s += pill(370, y, '', total - shownSum);
+      s += wire([[408, y], [SX - 14, midY]], { color: '#8796a6', width: 1 });
+    }
+    let x = SX;
+    s += op(x, midY, 'Σ', { tip: 'Σ over all ' + d.nin + ' products = ' + num(total, 4) });
+    s += wire([[x + 14, midY], [x + 66, midY]]);
+    x += 80;
+    s += wbox(x, midY - 56, 'b', { w: 40, tip: 'bias = ' + num(d.b, 4) });
+    s += wire([[x, midY - 42], [x, midY - 14]]);
+    s += op(x, midY, '+', { tip: 'z = Σ + b = ' + num(total, 4) + ' + ' + num(d.b, 4) + ' = ' + num(d.z, 4) });
+    s += pill(x - 40, midY - 22, '', total);
+    s += wire([[x + 14, midY], [x + 66, midY]]);
+    s += pill(x + 40, midY + 22, 'z', d.z);
+    x += 106;
+    s += gate(x, midY, o.actName, d.a, { w: 78, tip: o.actExpr + '  →  a = ' + num(d.a, 4) });
+    s += wire([[x + 40, midY], [x + 110, midY]]);
+    s += pill(x + 75, midY - 22, '', d.a, { tip: 'the unit\'s output — the bar in its box' });
+    s += txt(x + 116, midY + 5, 'a', { size: 15, weight: 600, anchor: 'start' });
+    const H = Math.max(top + nRows * rh + 10, midY + 70);
+    return svg(940, H, s, 'Dense unit ' + (o.ch + 1) + ' of layer ' + (o.li + 1) +
+      (first ? ': every one of the ' + d.nin + ' samples has its own weight.' : '.'));
+  }
+
+  /* ------------------------------------------------------ KAN node */
+  /** A small plot of one edge function, with this example's input marked on it. */
+  function edgePlot(x, y, w, h, e) {
+    const lo = e.curve[0][0], hi = e.curve[e.curve.length - 1][0];
+    let m = 1e-6;
+    e.curve.forEach((p) => { m = Math.max(m, Math.abs(p[1])); });
+    m = Math.max(m, Math.abs(e.phi));
+    const X = (v) => x + (v - lo) / (hi - lo) * w;
+    const Y = (v) => y + h / 2 - v / m * (h / 2 - 3);
+    let s = '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="4" fill="#fff" stroke="#c9d6e6"/>';
+    // the spline grid, where the curve can bend
+    s += '<rect x="' + X(e.curve.gridLo) + '" y="' + (y + 1) + '" width="' + (X(e.curve.gridHi) - X(e.curve.gridLo)) +
+      '" height="' + (h - 2) + '" fill="#f1f6fd"/>';
+    s += '<line x1="' + x + '" x2="' + (x + w) + '" y1="' + Y(0) + '" y2="' + Y(0) + '" stroke="#dfe4ea"/>';
+    s += '<path d="' + e.curve.map((p, q) => (q ? 'L' : 'M') + X(p[0]).toFixed(1) + ' ' + Y(p[1]).toFixed(1)).join(' ') +
+      '" fill="none" stroke="' + BLUE + '" stroke-width="1.6"/>';
+    const xi = Math.max(lo, Math.min(hi, e.x));
+    s += '<line x1="' + X(xi) + '" x2="' + X(xi) + '" y1="' + (y + 2) + '" y2="' + (y + h - 2) + '" stroke="#e0342b" stroke-dasharray="2 2"/>';
+    s += '<circle cx="' + X(xi) + '" cy="' + Y(e.phi) + '" r="3" fill="#e0342b"/>';
+    return s;
+  }
+
+  /**
+   * @param d  { edges:[{i, x, phi, base, spline, wb, active, curve}], sum, nin, rest, restSum, phiAll }
+   * @param o  { li, ch, t, name(i), input }
+   */
+  function kan(d, o) {
+    let s = '';
+    const first = o.li === 0;
+    let top = 50;
+    if (first) {
+      s += strip(36, 70, d.phiAll, o.input, o.t, 'φ(x_i) — what each of the ' + d.nin +
+        ' edges delivers for this example (colour) — the input in grey');
+      top = 160;
+    }
+    const rh = 56, nRows = d.edges.length + (d.rest ? 1 : 0);
+    const midY = top + (nRows - 1) * rh / 2;
+    const SX = 560;
+    d.edges.forEach((e, r) => {
+      const y = top + r * rh;
+      const hot = first && e.i === o.t;
+      s += txt(40, y + 4, o.name(e.i) + ' = ' + num(e.x), { size: 11, mono: true, anchor: 'start', color: hot ? BLUE : '#5b6873', weight: hot ? 700 : 400 });
+      s += wire([[150, y], [196, y]]);
+      s += '<g class="blk">' + tip('φ(x) = w_b·silu(x) + Σ c_m·B_m(x)\n' +
+        'at x = ' + num(e.x, 4) + (first ? '' : ' (standardised u = ' + num(e.u, 3) + ')') +
+        ':\n  base   w_b·silu(u) = ' + num(e.wb, 3) + ' · ' + num(siluK(e.u), 4) + ' = ' + num(e.base, 4) +
+        '\n  spline Σ c_m·B_m(u) = ' + num(e.spline, 4) +
+        (e.active.length ? '  (' + e.active.map((a) => 'c' + a.m + '·B' + a.m).join(' + ') + ')' : '  (x is outside the grid)') +
+        '\n  φ = ' + num(e.phi, 4)) +
+        edgePlot(200, y - 22, 170, 44, e) + '</g>';
+      s += wire([[372, y], [414, y]], { arrow: false });
+      s += pill(452, y, 'φ', e.phi);
+      s += wire([[494, y], [SX - 14, midY]], { color: '#8796a6', width: 1 });
+    });
+    if (d.rest) {
+      const y = top + d.edges.length * rh;
+      s += '<g class="blk">' + tip('the other ' + d.rest + ' edges, summed') +
+        '<rect x="40" y="' + (y - 14) + '" width="330" height="28" rx="5" fill="#f7f9fb" stroke="#dfe4ea" stroke-dasharray="3 3"/>' +
+        txt(50, y + 4, '+ ' + d.rest + ' more edges, each with its own φ', { size: 11, anchor: 'start', color: MUTED }) + '</g>';
+      s += wire([[372, y], [414, y]], { arrow: false });
+      s += pill(452, y, '', d.restSum);
+      s += wire([[494, y], [SX - 14, midY]], { color: '#8796a6', width: 1 });
+    }
+    s += op(SX, midY, 'Σ', { tip: 'h = Σ over all ' + d.nin + ' edges = ' + num(d.sum, 4) +
+      '\nThe node only adds up — every nonlinearity sits on the edges.' });
+    s += wire([[SX + 14, midY], [SX + 150, midY]]);
+    s += pill(SX + 82, midY - 22, '', d.sum, { tip: 'the node value — the bar in its box' });
+    s += txt(SX + 158, midY + 5, 'h', { size: 15, weight: 600, anchor: 'start' });
+    s += txt(SX + 40, midY + 40, 'no bias, no activation on the node', { size: 10.5, color: MUTED, anchor: 'start' });
+    s += txt(200, top - 34, 'edge functions φ(x) — shaded: the spline grid' + (first ? ' ' + KAN_LO + ' … ' + KAN_HI : ' (μ ± 2σ of what arrives)') +
+      ', red: where this example lands', { size: 11, color: MUTED, anchor: 'start' });
+    const H = Math.max(top + nRows * rh, midY + 70);
+    return svg(940, H, s, 'KAN node ' + (o.ch + 1) + ' of layer ' + (o.li + 1) + ': φ(x) = w_b·silu(x) + Σ c_m·B_m(x) on every edge.');
   }
 
   /* ------------------------------------------------------ state space */
@@ -573,16 +774,17 @@ const Flow = (() => {
     const mid = top + (rows * rh) / 2 - rh / 2;
     let s = '';
 
-    // final feature maps
-    s += txt(60, 28, 'last layer · ' + o.C + ' maps × ' + o.L, { size: 11, color: MUTED, anchor: 'start' });
+    // final feature maps (or units, for a network without a time axis)
+    s += txt(60, 28, o.head === 'none' ? 'last hidden layer · ' + o.C + ' units'
+      : 'last layer · ' + o.C + ' maps × ' + o.L, { size: 11, color: MUTED, anchor: 'start' });
     for (let c = 0; c < rowsC; c++) {
       const y = top + c * rh + (rows - rowsC) * rh / 2;
       s += '<rect x="60" y="' + (y - 8) + '" width="90" height="16" rx="3" fill="#e6effa" stroke="#c9d6e6"/>';
-      s += txt(105, y + 4, 'map ' + (c + 1), { size: 10, color: '#5b6873' });
+      s += txt(105, y + 4, (o.head === 'none' ? 'unit ' : 'map ') + (c + 1), { size: 10, color: '#5b6873' });
       s += wire([[150, y], [206, mid]], { color: '#8796a6', width: 1 });
     }
     if (o.C > rowsC) s += txt(105, top + rowsC * rh + 6, '+' + (o.C - rowsC) + ' more', { size: 10, color: MUTED });
-    s += gate(250, mid, o.headLabel, '', { w: 84, tip: o.headTip });
+    s += gate(250, mid, o.headLabel, '', { w: 84, tip: o.headTip, fill: o.head === 'none' ? '#8aa3bf' : null });
 
     // embedding
     const ex = 360;
@@ -628,5 +830,5 @@ const Flow = (() => {
       (o.trueIdx >= 0 ? ' The true class is in bold.' : ''));
   }
 
-  return { lstm, gru, rnn, conv, ssm, gnn, output };
+  return { lstm, gru, rnn, conv, ssm, gnn, output, dense, kan };
 })();

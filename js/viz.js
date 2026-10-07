@@ -129,10 +129,21 @@ function layoutNetwork(model, classes, cssW, oodOn) {
   const outH = Math.max(56, classes.length * 20 + 10) + (oodOn ? 22 : 0);
   cols.push({ kind: 'output', nodes: [{ w: 132, h: outH }] });
 
+  // a deep stack: tighten the gaps first, then narrow the boxes, and only then scroll sideways
+  const n = cols.length;
+  const fixedW = IN_W + 132;
+  const need = (g, w) => fixedW + (n - 2) * w + g * (n - 1) + 24;
+  let gap = COL_GAP, midW = NODE_W;
+  if (n > 2 && need(gap, midW) > cssW) {
+    gap = Math.max(34, (cssW - 24 - fixedW - (n - 2) * midW) / (n - 1));
+    if (need(gap, midW) > cssW) midW = Math.max(60, (cssW - 24 - fixedW - gap * (n - 1)) / (n - 2));
+    for (let c = 1; c < n - 1; c++) cols[c].nodes.forEach((nd) => { nd.w = midW; });
+  }
+
   // horizontal placement
   let totalW = 0;
   cols.forEach((c) => { totalW += c.nodes[0].w; });
-  totalW += COL_GAP * (cols.length - 1);
+  totalW += gap * (cols.length - 1);
   let x = Math.max(12, (cssW - totalW) / 2);
   const topPad = 30;
   let maxH = 0;
@@ -142,13 +153,15 @@ function layoutNetwork(model, classes, cssW, oodOn) {
     maxH = Math.max(maxH, h);
     col.x = x;
     col.h = h;
-    x += col.nodes[0].w + COL_GAP;
+    x += col.nodes[0].w + gap;
   });
   cols.forEach((col) => {
     let y = topPad + (maxH - col.h) / 2;
     col.nodes.forEach((nd) => { nd.x = col.x; nd.y = y; y += nd.h + NODE_VGAP; });
   });
-  return { cols, width: Math.max(cssW, totalW + 24), height: topPad + maxH + 34 };
+  // residual skips are drawn as arcs under the columns
+  const skips = model.stages.some((st) => st.res);
+  return { cols, width: Math.max(cssW, totalW + 24), height: topPad + maxH + (skips ? 52 : 34) };
 }
 
 /** Strength of the link between input channel ci and filter co. */
@@ -178,6 +191,33 @@ function rnnLinkStrength(stage, unit, ci) {
 function stageLink(model, li, co, ci) {
   const st = model.stages[li];
   if (st.conv) return linkStrength(st.conv, co, ci);
+  if (st.mlp) {
+    const d = st.dense;
+    if (li === 0) {                       // the whole window arrives as one link
+      let sum = 0, signed = 0;
+      for (let i = 0; i < d.nin; i++) { const w = d.W[co * d.nin + i]; sum += Math.abs(w); signed += w; }
+      return { mag: sum / d.nin, sign: signed >= 0 ? 1 : -1 };
+    }
+    const w = d.W[co * d.nin + ci];
+    return { mag: Math.abs(w), sign: w >= 0 ? 1 : -1 };
+  }
+  if (st.kan) {
+    // size of an edge function: its silu weight plus the spread of its spline
+    const L = st.layer, nin = L.nin;
+    const edgeMag = (i) => {
+      const row = (co * nin + i) * KAN_NB;
+      let c = 0;
+      for (let m = 0; m < KAN_NB; m++) c += Math.abs(L.pc.W[row + m]);
+      return { mag: Math.abs(L.pw.W[co * nin + i]) + c / KAN_NB, sign: L.pw.W[co * nin + i] };
+    };
+    if (li === 0) {
+      let sum = 0, signed = 0;
+      for (let i = 0; i < nin; i++) { const e = edgeMag(i); sum += e.mag; signed += e.sign; }
+      return { mag: sum / nin, sign: signed >= 0 ? 1 : -1 };
+    }
+    const e = edgeMag(ci);
+    return { mag: e.mag, sign: e.sign >= 0 ? 1 : -1 };
+  }
   if (st.ssm) {
     const w = st.layer.pin.W[co * st.layer.D + ci];
     return { mag: Math.abs(w), sign: w >= 0 ? 1 : -1 };
@@ -193,6 +233,7 @@ function stageLink(model, li, co, ci) {
 function stageInputCount(model, li) {
   const st = model.stages[li];
   if (st.conv) return st.conv.cin;
+  if (st.mlp || st.kan) return li === 0 ? 1 : model.stages[li - 1].C;
   if (st.ssm || st.gnn) return st.layer.D;
   return st.layer.fwd.D;
 }
@@ -273,8 +314,16 @@ function drawNetwork(ctx, o) {
     const snap = st.snapshot;
     let scale = 1e-6;
     if (snap) for (let i = 0; i < snap.length; i++) scale = Math.max(scale, Math.abs(snap[i]));
+    // a deep stack narrows the columns, so its labels go short: "L3 K5 res ↓"
+    const narrow = col.nodes[0].w < NODE_W;
     label(ctx, col.x, col.nodes[0].y - 8, st.conv
-      ? 'LAYER ' + (li + 1) + ' · K=' + st.conv.k + (st.pooled ? ' · pool' : '')
+      ? (narrow
+        ? 'L' + (li + 1) + ' K' + st.conv.k + (st.res ? ' res' : '') + (st.pooled ? ' ↓' : '')
+        : 'LAYER ' + (li + 1) + ' · K=' + st.conv.k + (st.res ? ' · res' : '') + (st.pooled ? ' · pool' : ''))
+      : st.mlp
+        ? 'LAYER ' + (li + 1) + ' · DENSE · ' + (li === 0 ? WIN : model.stages[li - 1].C) + ' in'
+      : st.kan
+        ? 'LAYER ' + (li + 1) + ' · KAN · ' + (li === 0 ? WIN : model.stages[li - 1].C) + ' in'
       : st.gnn
         ? 'LAYER ' + (li + 1) + ' · GNN · ' + st.layer.agg
       : st.ssm
@@ -285,6 +334,10 @@ function drawNetwork(ctx, o) {
       const isHot = hover && hover.type === 'filter' && hover.layer === li && hover.ch === c;
       const isSel = sel && sel.type === 'filter' && sel.layer === li && sel.ch === c;
       drawNodeBox(ctx, nd, isHot, isSel);
+      if (st.mlp || st.kan) {
+        drawUnitBox(ctx, nd, model, li, c, mode);
+        continue;
+      }
       if (snap) {
         if (mode === 'freq') {
           const m = magSpectrum(snap, c * st.L, st.L);
@@ -309,6 +362,34 @@ function drawNetwork(ctx, o) {
         ctx.fillText(c < st.units ? '→' : '←', nd.x + 6, nd.y + 11);
       }
     }
+  }
+
+  // residual skips: y = f(x) + x, drawn under the two columns they join
+  for (let li = 0; li < model.stages.length; li++) {
+    const st = model.stages[li];
+    if (!st.res) continue;
+    const a = cols[li], b = cols[li + 1];
+    const bottom = (col) => col.nodes[col.nodes.length - 1].y + col.nodes[col.nodes.length - 1].h;
+    const x1 = a.x + a.nodes[0].w / 2, x2 = b.x + b.nodes[0].w / 2;
+    const y1 = bottom(a) + 3, y2 = bottom(b) + 3;
+    const yb = Math.max(y1, y2) + 18;
+    ctx.save();
+    ctx.strokeStyle = '#2b6cb0';
+    ctx.globalAlpha = 0.75;
+    ctx.setLineDash([4, 3]);
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.bezierCurveTo(x1, yb, x2, yb, x2, y2 + 5);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#2b6cb0';
+    ctx.beginPath();                 // arrowhead into the block it is added to
+    ctx.moveTo(x2, y2); ctx.lineTo(x2 - 4, y2 + 7); ctx.lineTo(x2 + 4, y2 + 7); ctx.closePath();
+    ctx.fill();
+    ctx.font = '600 9px system-ui, sans-serif';
+    ctx.fillText(st.proj ? '+ skip (1×1)' : '+ skip', (x1 + x2) / 2 - (st.proj ? 26 : 14), yb - 2);
+    ctx.restore();
   }
 
   // output
@@ -373,6 +454,15 @@ function drawSelectionOverlay(ctx, o) {
   const prevCol = cols[sel.layer];              // the column feeding the selected layer
   const prevLen = sel.layer === 0 ? WIN : model.stages[sel.layer - 1].L;
   const inner = sel.layer === 0 ? 5 : 4;
+  if (st.mlp || st.kan) {
+    // a dense unit reads every input; in the first layer t picks one of them
+    prevCol.nodes.forEach((nd) => span(nd, inner, prevLen, 0, prevLen - 1, 'rgba(29,78,216,0.10)'));
+    if (sel.layer === 0) {
+      span(prevCol.nodes[0], 5, WIN, tPos, tPos, 'rgba(29,78,216,0.55)');
+      span(cols[1].nodes[sel.ch], 4, WIN, tPos, tPos, 'rgba(29,78,216,0.55)');
+    }
+    return;
+  }
   if (st.conv) {
     // the kernel receptive window across every input channel
     const c = st.conv;
@@ -388,6 +478,76 @@ function drawSelectionOverlay(ctx, o) {
   const outNd = cols[sel.layer + 1].nodes[sel.ch];
   const tp = st.pooled ? tPos >> 1 : tPos;
   span(outNd, 4, st.L, tp, tp, 'rgba(29,78,216,0.55)');
+}
+
+/**
+ * Inside an MLP or KAN unit. First layer: what the unit does across the window —
+ * the 128 weights of an MLP unit (its template), or the 128 edge outputs φ(x_i)
+ * of a KAN node. Deeper layers: the weights (MLP) or the edge functions (KAN)
+ * from the previous layer. A bar at the bottom shows the unit's value.
+ */
+function drawUnitBox(ctx, nd, model, li, c, mode) {
+  const st = model.stages[li];
+  const x = nd.x + 4, y = nd.y + 3, w = nd.w - 8, h = nd.h - 13;
+  if (st.mlp) {
+    const d = st.dense;
+    if (li === 0) {
+      if (mode === 'freq') {
+        const m = magSpectrum(d.W, c * d.nin, d.nin);
+        drawSpectrum(ctx, x, y, w, h, m, maxOf(m));
+      } else {
+        drawWave(ctx, x, y, w, h, d.W, c * d.nin, d.nin, maxAbs(d.W, c * d.nin, d.nin));
+      }
+    } else {
+      drawKernel(ctx, x, y, w, h, d.W, c * d.nin, d.nin);
+    }
+  } else if (st.phi) {
+    const L = st.layer;
+    if (li === 0) {
+      drawWave(ctx, x, y, w, h, st.phi, c * L.nin, L.nin, maxAbs(st.phi, 0, st.phi.length));
+    } else {
+      // one small plot per incoming edge function
+      const k = L.nin, cw = w / k;
+      for (let i = 0; i < k; i++) {
+        const pts = model.edgeCurve(li, c, i, 24);
+        let m = 1e-6;
+        pts.forEach((p) => { m = Math.max(m, Math.abs(p[1])); });
+        const bx = x + i * cw;
+        ctx.strokeStyle = '#eceff3'; ctx.lineWidth = 1;
+        ctx.strokeRect(bx + 1, y, cw - 2, h);
+        ctx.beginPath();
+        pts.forEach((p, q) => {
+          const X = bx + 2 + (q / (pts.length - 1)) * (cw - 4);
+          const Y = y + h / 2 - (p[1] / m) * (h / 2 - 2);
+          if (q === 0) ctx.moveTo(X, Y); else ctx.lineTo(X, Y);
+        });
+        ctx.strokeStyle = '#2b6cb0'; ctx.lineWidth = 1.2;
+        ctx.stroke();
+        // where this example's input lands on the curve
+        const xin = st.input ? st.input[i] : 0;
+        const x0 = pts[0][0], x1 = pts[pts.length - 1][0];
+        const f = (xin - x0) / (x1 - x0);
+        if (f >= 0 && f <= 1) {
+          const v = st.phi[c * k + i];
+          ctx.fillStyle = '#e0342b';
+          ctx.beginPath();
+          ctx.arc(bx + 2 + f * (cw - 4), y + h / 2 - Math.max(-1, Math.min(1, v / m)) * (h / 2 - 2), 2, 0, 6.284);
+          ctx.fill();
+        }
+      }
+    }
+  }
+  // the unit's value for this example, as a bar around the centre
+  if (st.snapshot) {
+    const v = st.snapshot[c];
+    const m = maxAbs(st.snapshot, 0, st.snapshot.length);
+    const by = nd.y + nd.h - 8, cx = nd.x + nd.w / 2, half = (nd.w - 12) / 2;
+    ctx.fillStyle = '#eef1f4';
+    ctx.fillRect(nd.x + 6, by, nd.w - 12, 4);
+    const len = half * Math.max(-1, Math.min(1, v / m));
+    ctx.fillStyle = v >= 0 ? POS : NEG;
+    ctx.fillRect(len >= 0 ? cx : cx + len, by, Math.abs(len), 4);
+  }
 }
 
 function drawLink(ctx, from, to, a, sign, hot, hoverActive) {

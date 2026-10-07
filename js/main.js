@@ -1,7 +1,7 @@
 /* main.js — application state, UI wiring and the training loop. */
 
 const state = {
-  arch: 'cnn',                 // 'cnn' | 'rnn'
+  arch: 'cnn',                 // 'mlp' | 'cnn' | 'rnn' | 'ssm' | 'gnn' | 'kan'
   classes: ['clean', 'ripple', 'harm', 'spike'],
   layers: [
     { filters: 4, kernel: 5, pool: true },
@@ -10,6 +10,9 @@ const state = {
   rnnLayers: [{ units: 8, bidir: false }],
   ssmLayers: [{ units: 6 }],
   gnnLayers: [{ units: 8 }, { units: 8 }],
+  mlpLayers: [{ units: 8 }],
+  kanLayers: [{ units: 4 }, { units: 4 }],
+  residual: false,             // ResNet skips in the convolutional playground
   agg: 'mean',
   cell: 'gru',
   ssmMode: 's4',
@@ -106,7 +109,15 @@ function probeInfo() {
 function archLayers() {
   if (state.arch === 'cnn') return state.layers;
   if (state.arch === 'rnn') return state.rnnLayers;
+  if (state.arch === 'mlp') return state.mlpLayers;
+  if (state.arch === 'kan') return state.kanLayers;
   return state.arch === 'ssm' ? state.ssmLayers : state.gnnLayers;
+}
+
+/** Most layers each playground allows. */
+function maxLayers() {
+  if (state.arch === 'cnn') return 8;
+  return state.arch === 'mlp' || state.arch === 'kan' ? 3 : 2;
 }
 
 function rebuildModel() {
@@ -116,6 +127,20 @@ function rebuildModel() {
       activation: state.activation,
       head: state.head,
       causal: state.causal,
+      residual: state.residual,
+      nClasses: activeClasses().length,
+      inputLen: WIN,
+    });
+  } else if (state.arch === 'mlp') {
+    model = new MLPNet({
+      layers: JSON.parse(JSON.stringify(state.mlpLayers)),
+      activation: state.activation,
+      nClasses: activeClasses().length,
+      inputLen: WIN,
+    });
+  } else if (state.arch === 'kan') {
+    model = new KANNet({
+      layers: JSON.parse(JSON.stringify(state.kanLayers)),
       nClasses: activeClasses().length,
       inputLen: WIN,
     });
@@ -172,9 +197,13 @@ function setArch(arch) {
   $('archRnn').classList.toggle('on', arch === 'rnn');
   $('archSsm').classList.toggle('on', arch === 'ssm');
   $('archGnn').classList.toggle('on', arch === 'gnn');
+  $('archMlp').classList.toggle('on', arch === 'mlp');
+  $('archKan').classList.toggle('on', arch === 'kan');
   $('layerLbl').textContent = arch === 'cnn' ? 'Convolutional layers'
     : arch === 'rnn' ? 'Recurrent layers'
-      : arch === 'ssm' ? 'State space layers' : 'Message passing layers';
+      : arch === 'mlp' ? 'Hidden layers'
+        : arch === 'kan' ? 'KAN layers'
+          : arch === 'ssm' ? 'State space layers' : 'Message passing layers';
   setStream(false);
   ood.cal = null; ood.stats = null;
   wm.last = null; wm.sweep = null;
@@ -539,6 +568,71 @@ function drawInspector(probs, oodInfo) {
     }
     return;
   }
+  if (h0 && h0.type === 'filter' && model.kind === 'mlp') {
+    const st = model.stages[h0.layer], d = st.dense, first = h0.layer === 0;
+    const off = h0.ch * d.nin;
+    title(first ? 'WEIGHTS OVER THE WINDOW — THIS UNIT\'S TEMPLATE' : 'WEIGHTS FROM THE ' + d.nin + ' UNITS BEFORE', 10);
+    if (first) drawWave(ctx, 0, 14, w, 62, d.W, off, d.nin, maxAbs(d.W, off, d.nin));
+    else drawKernel(ctx, 0, 14, w, 62, d.W, off, d.nin);
+    if (first) {
+      title('ITS SPECTRUM — THE FREQUENCIES IT MATCHES', 96);
+      const m = magSpectrum(d.W, off, d.nin);
+      drawSpectrum(ctx, 0, 100, w, 46, m, maxOf(m));
+      ctx.fillStyle = '#98a2ad';
+      ctx.font = '9px system-ui,sans-serif';
+      ctx.fillText('0', 0, 158);
+      ctx.fillText('1600 Hz', w - 42, 158);
+    }
+    const a = st.snapshot ? st.snapshot[h0.ch] : 0;
+    txt.innerHTML = '<b>Layer ' + (h0.layer + 1) + ', unit ' + (h0.ch + 1) + '</b> · ' + d.nin +
+      ' weights + bias · output ' + n3(a) +
+      (first
+        ? '<br>The unit multiplies the window sample by sample with this template and adds it up. ' +
+          'Nothing is shared between positions: a disturbance a few samples later meets different weights.'
+        : '<br>A deeper unit mixes the units before it — no time axis is left at this point.');
+    return;
+  }
+  if (h0 && h0.type === 'filter' && model.kind === 'kan') {
+    const st = model.stages[h0.layer], L = st.layer, first = h0.layer === 0;
+    const lo = KAN_LO - 0.8, hi = KAN_HI + 0.8, n = 28;
+    title('EDGE FUNCTIONS φ(x) — ' + (first ? 'ALL ' + L.nin + ' OVERLAID' : 'ONE PER INPUT'), 10);
+    const curves = [];
+    let m = 1e-6;
+    for (let i = 0; i < L.nin; i++) {
+      const c = model.edgeCurve(h0.layer, h0.ch, i, n);
+      c.forEach((p) => { m = Math.max(m, Math.abs(p[1])); });
+      curves.push(c);
+    }
+    const gx = (v) => (v - lo) / (hi - lo) * w;
+    const ch = first ? 72 : 130, cy = 14 + ch / 2;
+    ctx.fillStyle = '#f1f6fd';
+    ctx.fillRect(gx(KAN_LO), 14, gx(KAN_HI) - gx(KAN_LO), ch);
+    ctx.strokeStyle = '#dfe4ea'; ctx.lineWidth = 0.6;
+    ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(w, cy); ctx.stroke();
+    const palette = ['#2b6cb0', '#c2760f', '#2e9e5b', '#8e44ad', '#e0342b', '#16a085', '#7f8c8d', '#d35400'];
+    curves.forEach((c, i) => {
+      ctx.beginPath();
+      c.forEach((p, q) => {
+        const X = gx(lo + (hi - lo) * q / (c.length - 1)), Y = cy - p[1] / m * (ch / 2 - 2);
+        if (q === 0) ctx.moveTo(X, Y); else ctx.lineTo(X, Y);
+      });
+      ctx.strokeStyle = first ? 'rgba(43,108,176,0.22)' : palette[i % palette.length];
+      ctx.lineWidth = first ? 1 : 1.6;
+      ctx.stroke();
+    });
+    if (first && st.phi) {
+      title('φ(x_i) ACROSS THE WINDOW — WHAT EACH SAMPLE ADDS', 102);
+      drawWave(ctx, 0, 106, w, 56, st.phi, h0.ch * L.nin, L.nin, maxAbs(st.phi, h0.ch * L.nin, L.nin));
+    }
+    const v = st.snapshot ? st.snapshot[h0.ch] : 0;
+    txt.innerHTML = '<b>Layer ' + (h0.layer + 1) + ', node ' + (h0.ch + 1) + '</b> · ' + L.nin +
+      ' edges × ' + (KAN_NB + 1) + ' numbers · value ' + n3(v) +
+      '<br>Every edge is its own learned curve (cubic B-spline on ' + KAN_LO + ' … ' + KAN_HI +
+      (first ? '' : ' in standardised units') + ', plus a silu term for the tails). The node just adds ' +
+      'the curves\' outputs — no weights on the node, no activation.' +
+      (first ? '' : '<br>Colours match the inputs from left to right in the node\'s box.');
+    return;
+  }
   if (h0 && h0.type === 'filter' && model.kind === 'rnn') {
     const st = model.stages[h0.layer];
     const iw = model.unitInputWeights(h0.layer, h0.ch);
@@ -720,7 +814,19 @@ function convAt(li, ch, t) {
 
 /** The filter value after activation (and pooling) at position t. */
 function filterValueAt(li, ch, t) {
-  return applyAct(convAt(li, ch, t).z);
+  const v = applyAct(convAt(li, ch, t).z);
+  return model.stages[li].res ? v + skipAt(li, ch, t) : v;
+}
+
+/** The residual skip into filter ch at t: the same input channel, or its 1×1 projection. */
+function skipAt(li, ch, t) {
+  const st = model.stages[li];
+  const { Lin, xin, cin } = layerInput(li);
+  if (!xin) return 0;
+  if (!st.proj) return xin[ch * Lin + t];
+  let s = st.proj.b[ch];
+  for (let c = 0; c < cin; c++) s += st.proj.W[ch * cin + c] * xin[c * Lin + t];
+  return s;
 }
 
 let lastMathAt = 0;
@@ -783,6 +889,8 @@ function renderMathInner(host) {
   }
   if (sel.type === 'filter') {
     if (model.kind === 'rnn') renderUnitMath(host, title, slider, sel);
+    else if (model.kind === 'mlp') renderMlpMath(host, title, slider, sel);
+    else if (model.kind === 'kan') renderKanMath(host, title, slider, sel);
     else if (model.kind === 'gnn') renderGnnMath(host, title, slider, sel);
     else if (model.kind === 'ssm') renderSsmMath(host, title, slider, sel);
     else renderFilterMath(host, title, slider, sel);
@@ -1158,6 +1266,218 @@ function rnnDownstreamHtml(li, unit, num) {
   return html;
 }
 
+/* ------------------------------------------------------- MLP / KAN unit */
+/** Position t picks one input sample in the first layer; deeper layers have no time axis. */
+function denseSlider(slider, first) {
+  if (!first) {
+    slider.disabled = true;
+    $('tposVal').textContent = '—';
+    return null;
+  }
+  const t = Math.min(state.tPos, WIN - 1);
+  state.tPos = t;
+  slider.disabled = false;
+  slider.max = WIN - 1;
+  slider.value = t;
+  $('tposVal').textContent = 'input t = ' + t + '  (' + (t / SR * 1000).toFixed(2) + ' ms)';
+  return t;
+}
+
+function renderMlpMath(host, title, slider, sel) {
+  const li = sel.layer, j = sel.ch;
+  const st = model.stages[li];
+  if (!st || j >= st.C) { state.selected = null; return renderMathInner(host); }
+  const first = li === 0;
+  const t = denseSlider(slider, first);
+  title.textContent = 'Layer ' + (li + 1) + ' · unit ' + (j + 1) + ' · dense' + (first ? ' · input t = ' + t : '');
+
+  const d = model.unitDetail(li, j, state.probe);
+  const name = (i) => (first ? 'x[' + i + ']' : 'h' + (i + 1));
+  setFlow(Flow.dense(d, {
+    li, ch: j, t, act: state.activation, actName: ACT_NAMES[state.activation], actExpr: actExpr(d.z), name,
+  }));
+
+  let total = 0;
+  for (let i = 0; i < d.nin; i++) total += d.w[i] * d.x[i];
+  let html = '<h4>1 · Weighted sum of all ' + d.nin + ' inputs</h4>';
+  html += '<div class="formula">z = <span class="op">Σ</span><sub>i=0..' + (d.nin - 1) + '</sub> w[' + j +
+    '][i] · ' + (first ? 'x[i]' : 'h[i]') + ' + b' + (first
+    ? '  <span class="op">— one weight per sample, ' + d.nin + ' in all and none shared. A CNN filter ' +
+      'uses the same K weights at every position.</span>'
+    : '') + '</div>';
+
+  const order = Array.from({ length: d.nin }, (_, i) => i)
+    .sort((a, b) => Math.abs(d.w[b] * d.x[b]) - Math.abs(d.w[a] * d.x[a]));
+  const rows = order.slice(0, Math.min(16, d.nin));
+  if (first && !rows.includes(t)) rows.push(t);
+  rows.sort((a, b) => a - b);
+  let shown = 0;
+  html += '<div class="scrollx" style="margin-top:8px"><table class="mtab"><thead><tr><th>input</th>' +
+    '<th>value</th><th>weight</th><th>product</th></tr></thead><tbody>';
+  rows.forEach((i) => {
+    const p = d.w[i] * d.x[i];
+    shown += p;
+    html += '<tr' + (first && i === t ? ' style="background:#eef4fd"' : '') + '><td class="ch">' + name(i) +
+      (first && i === t ? ' ← t' : '') + '</td><td>' + n3(d.x[i]) + '</td>' +
+      '<td style="color:' + wColor(d.w[i]) + '">' + n3(d.w[i]) + '</td><td class="sum">' + n4(p) + '</td></tr>';
+  });
+  if (rows.length < d.nin) {
+    html += '<tr><td class="ch">the other ' + (d.nin - rows.length) + '</td><td></td><td></td>' +
+      '<td class="sum">' + n4(total - shown) + '</td></tr>';
+  }
+  html += '</tbody></table></div>';
+  html += '<div class="formula" style="margin-top:8px">Σ (all ' + d.nin + ' products) = <b>' + n4(total) +
+    '</b>  <span class="op">+</span>  bias b = <b style="color:' + wColor(d.b) + '">' + n4(d.b) +
+    '</b>  <span class="op">→</span>  z = <span class="res">' + n4(d.z) + '</span>' +
+    (first ? '  <span class="op">(the 16 largest products are listed, plus position t)</span>' : '') + '</div>';
+
+  html += '<h4>2 · Activation — ' + ACT_NAMES[state.activation] + '</h4>';
+  html += '<div class="formula">' + actExpr(d.z) + '  <span class="op">→</span>  ' +
+    '<span class="res' + (d.a === 0 ? ' warn' : '') + '">a = ' + n4(d.a) + '</span>' +
+    (d.a === 0 && state.activation === 'relu' ? '  <span class="op">— this unit is silent for this example</span>' : '') +
+    '</div>';
+  html += '<div class="formula" style="margin-top:6px"><span class="op">check: the unit holds ' + n4(d.a) +
+    (Math.abs(applyAct(d.z) - d.a) < 1e-4 ? ' ✓ matches' : ' ⚠ mismatch') + '</span></div>';
+
+  html += denseDownstreamHtml(li, j, d.a, 3);
+  host.innerHTML = html;
+}
+
+function renderKanMath(host, title, slider, sel) {
+  const li = sel.layer, j = sel.ch;
+  const st = model.stages[li];
+  if (!st || j >= st.C || !st.phi) { state.selected = null; return renderMathInner(host); }
+  const first = li === 0;
+  const t = denseSlider(slider, first);
+  title.textContent = 'Layer ' + (li + 1) + ' · node ' + (j + 1) + ' · KAN' + (first ? ' · input t = ' + t : '');
+
+  const L = st.layer, nin = L.nin, xin = st.input;
+  const phiAll = st.phi.subarray(j * nin, (j + 1) * nin);
+  const name = (i) => (first ? 'x[' + i + ']' : 'h' + (i + 1));
+  const value = st.snapshot[j];
+
+  // the diagram: the strongest edges (and position t), the rest summed
+  let rows;
+  if (nin <= 8) rows = Array.from({ length: nin }, (_, i) => i);
+  else {
+    rows = Array.from({ length: nin }, (_, i) => i).sort((a, b) => Math.abs(phiAll[b]) - Math.abs(phiAll[a])).slice(0, 5);
+    if (!rows.includes(t)) rows.push(t);
+    rows.sort((a, b) => a - b);
+  }
+  let shown = 0;
+  const edges = rows.map((i) => {
+    const e = L.edge(j, i, xin[i]);
+    shown += e.phi;
+    return { i, x: xin[i], ...e, curve: model.edgeCurve(li, j, i, 48) };
+  });
+  setFlow(Flow.kan({
+    edges, sum: value, nin, rest: nin - rows.length, restSum: value - shown, phiAll,
+  }, { li, ch: j, t, name, input: xin }));
+
+  let html = '<h4>1 · The node adds up its edges</h4>';
+  html += '<div class="formula">h<sub>' + (j + 1) + '</sub> = <span class="op">Σ</span><sub>i=0..' + (nin - 1) +
+    '</sub> φ<sub>' + (j + 1) + ',i</sub>( ' + (first ? 'x[i]' : 'h[i]') + ' ) &nbsp;&nbsp; φ(x) = w<sub>b</sub>·silu(x) + ' +
+    '<span class="op">Σ</span><sub>m</sub> c<sub>m</sub>·B<sub>m</sub>(x)</div>';
+  if (!first) {
+    html += '<div class="formula" style="margin-top:6px">u = (h − μ) / σ <span class="op">— the inputs of a ' +
+      'deeper layer are standardised into the grid; μ and σ are running averages from training, so a node ' +
+      'value of any size still lands where the splines live (the KAN paper calls this a grid update)</span></div>';
+  }
+  html += '<div class="formula" style="margin-top:6px"><span class="op">B<sub>m</sub> are cubic B-splines on ' +
+    KAN_G + ' grid intervals over ' + KAN_LO + ' … ' + KAN_HI + ': ' + KAN_NB + ' coefficients c<sub>m</sub> plus w<sub>b</sub> = ' +
+    (KAN_NB + 1) + ' numbers per edge, ' + (KAN_NB + 1) * nin + ' for this node. At any x only 4 of the B<sub>m</sub> ' +
+    'are non-zero, so each edge evaluates in a few multiplications.</span></div>';
+
+  // the edges in detail: the one at t in the first layer, all of them deeper in
+  const detail = first ? [t] : Array.from({ length: nin }, (_, i) => i);
+  html += '<h4>2 · ' + (first ? 'The edge from x[' + t + ']' : 'Every edge, at this example') + '</h4>';
+  html += '<div class="scrollx"><table class="mtab"><thead><tr><th>input</th><th>x</th>' +
+    (first ? '' : '<th>μ</th><th>σ</th><th>u</th>') + '<th>silu(' + (first ? 'x' : 'u') + ')</th>' +
+    '<th>w<sub>b</sub></th><th>base</th><th>active splines c<sub>m</sub>·B<sub>m</sub>(x)</th><th>spline</th>' +
+    '<th>φ(x)</th></tr></thead><tbody>';
+  detail.forEach((i) => {
+    const e = L.edge(j, i, xin[i]);
+    const act = e.active.length
+      ? e.active.map((a) => 'c' + a.m + '·B' + a.m + ' = ' + n3(a.c) + '·' + n3(a.B)).join('  ')
+      : 'x is outside the grid — only the silu term acts';
+    html += '<tr><td class="ch">' + name(i) + '</td><td>' + n3(xin[i]) + '</td>' +
+      (first ? '' : '<td>' + n3(L.mu[i]) + '</td><td>' + n3(L.sd[i]) + '</td><td>' + n3(e.u) + '</td>') +
+      '<td>' + n3(siluK(e.u)) + '</td>' +
+      '<td style="color:' + wColor(e.wb) + '">' + n3(e.wb) + '</td><td>' + n4(e.base) + '</td>' +
+      '<td style="text-align:left">' + act + '</td><td>' + n4(e.spline) + '</td>' +
+      '<td class="sum">' + n4(e.phi) + '</td></tr>';
+  });
+  html += '</tbody></table></div>';
+
+  let sec = 3;
+  if (first) {
+    html += '<h4>' + (sec++) + ' · Summing the ' + nin + ' edges</h4>';
+    const order = Array.from({ length: nin }, (_, i) => i)
+      .sort((a, b) => Math.abs(phiAll[b]) - Math.abs(phiAll[a])).slice(0, 12).sort((a, b) => a - b);
+    let s12 = 0;
+    html += '<div class="scrollx"><table class="mtab"><thead><tr><th>input</th><th>x</th><th>φ(x)</th></tr></thead><tbody>';
+    order.forEach((i) => {
+      s12 += phiAll[i];
+      html += '<tr><td class="ch">' + name(i) + '</td><td>' + n3(xin[i]) + '</td><td class="sum">' + n4(phiAll[i]) + '</td></tr>';
+    });
+    html += '<tr><td class="ch">the other ' + (nin - order.length) + '</td><td></td><td class="sum">' +
+      n4(value - s12) + '</td></tr></tbody></table></div>';
+  }
+  let check = 0;
+  for (let i = 0; i < nin; i++) check += L.edge(j, i, xin[i]).phi;
+  html += '<div class="formula" style="margin-top:8px">h<sub>' + (j + 1) + '</sub> = Σ φ = <span class="res">' +
+    n4(value) + '</span>  <span class="op">no bias and no activation — the nonlinearity is in the edges · ' +
+    'check: recomputed from the ' + nin + ' edge functions ' + n4(check) +
+    (Math.abs(check - value) < 1e-3 ? ' ✓ matches' : ' ⚠ mismatch') + '</span></div>';
+
+  html += denseDownstreamHtml(li, j, value, sec);
+  host.innerHTML = html;
+}
+
+/** Where the output of an MLP unit or a KAN node goes: the next layer, or the class logits. */
+function denseDownstreamHtml(li, j, val, sec) {
+  const last = li === model.stages.length - 1;
+  let html = '<h4>' + sec + ' · Where this value goes</h4>';
+  if (!last) {
+    const nx = model.stages[li + 1];
+    if (nx.mlp) {
+      const d = nx.dense;
+      html += '<div class="formula">This value is <b>input ' + (j + 1) + '</b> of every unit in layer ' + (li + 2) +
+        ', each with its own weight:</div>';
+      html += '<div class="scrollx"><table class="mtab"><thead><tr><th>unit in layer ' + (li + 2) +
+        '</th><th>weight</th><th>contribution w·a</th></tr></thead><tbody>';
+      for (let q = 0; q < d.nout; q++) {
+        const w = d.W[q * d.nin + j];
+        html += '<tr><td class="ch">unit ' + (q + 1) + '</td><td style="color:' + wColor(w) + '">' + n3(w) +
+          '</td><td class="sum">' + n4(w * val) + '</td></tr>';
+      }
+    } else {
+      const L = nx.layer;
+      html += '<div class="formula">This value enters every node of layer ' + (li + 2) +
+        ' through that edge\'s own function φ:</div>';
+      html += '<div class="scrollx"><table class="mtab"><thead><tr><th>node in layer ' + (li + 2) +
+        '</th><th>φ(' + n3(val) + ')</th></tr></thead><tbody>';
+      for (let q = 0; q < L.nout; q++) {
+        html += '<tr><td class="ch">node ' + (q + 1) + '</td><td class="sum">' + n4(L.edge(q, j, val).phi) + '</td></tr>';
+      }
+    }
+    return html + '</tbody></table></div>';
+  }
+  const d = model.dense, cls = activeClasses(), probs = model.probs;
+  html += '<div class="formula">The last hidden layer feeds a linear layer: logit<sub>k</sub> = Σ W[k][i]·h[i] + b[k]. ' +
+    'This value is h[' + j + ']:</div>';
+  html += '<div class="scrollx" style="margin-top:8px"><table class="mtab"><thead><tr>' +
+    '<th>class</th><th>weight to class</th><th>contribution</th><th>class bias</th><th>logit (total)</th>' +
+    '<th>softmax</th></tr></thead><tbody>';
+  for (let k = 0; k < d.nout; k++) {
+    const w = d.W[k * d.nin + j];
+    html += '<tr><td class="ch"><span class="chip" style="background:' + cls[k].color + '"></span> ' + cls[k].name +
+      '</td><td style="color:' + wColor(w) + '">' + n3(w) + '</td><td>' + n4(w * val) + '</td><td>' + n3(d.b[k]) +
+      '</td><td>' + n3(model.logits[k]) + '</td><td class="sum">' + (probs[k] * 100).toFixed(1) + '%</td></tr>';
+  }
+  return html + '</tbody></table></div>';
+}
+
 /* ------------------------------------------------------------ filter */
 function renderFilterMath(host, title, slider, sel) {
   const li = sel.layer, ch = sel.ch;
@@ -1177,6 +1497,7 @@ function renderFilterMath(host, title, slider, sel) {
 
   const c = convAt(li, ch, t);
   const a = applyAct(c.z);
+  const skip = st.res ? skipAt(li, ch, t) : 0;
   let pool = null;
   if (st.pooled) {
     const even = t - (t % 2);
@@ -1186,6 +1507,7 @@ function renderFilterMath(host, title, slider, sel) {
   }
   setFlow(Flow.conv(c, {
     t, li, ch, a, pool, act: state.activation, actName: ACT_NAMES[state.activation], actExpr: actExpr(c.z),
+    skip: st.res ? { s: skip, proj: !!st.proj } : null,
   }));
   let html = '';
 
@@ -1234,17 +1556,32 @@ function renderFilterMath(host, title, slider, sel) {
     (a === 0 && state.activation === 'relu' ? '  <span class="op">— this filter is silent here</span>' : '') +
     '</div>';
 
-  /* --- 3. pooling --- */
-  let outVal = a, tp = t;
+  /* --- 3. residual skip --- */
+  let sec = 3;
+  let outVal = a + skip, tp = t;
+  if (st.res) {
+    const { cin } = layerInput(li);
+    html += '<h4>' + (sec++) + ' · Skip connection (ResNet)</h4>';
+    html += '<div class="formula">y = a + ' + (st.proj
+      ? 'Σ<sub>c</sub> P[' + ch + '][c] · x[c][' + t + '] + b<sub>P</sub>'
+      : 'x[' + ch + '][' + t + ']') + ' = ' + n3(a) + ' + ' + n3(skip) +
+      ' = <span class="res">' + n4(a + skip) + '</span>  <span class="op">' + (st.proj
+        ? '— ' + cin + ' input channels become ' + st.C + ', so the skip goes through a learned 1×1 convolution'
+        : '— the block input is added back untouched, so its gradient reaches the layer below unchanged') +
+      '</span></div>';
+  }
+
+  /* --- 4. pooling --- */
   if (st.pooled) {
     const even = t - (t % 2);
     const v0 = filterValueAt(li, ch, even);
     const v1 = even + 1 < Lin ? filterValueAt(li, ch, even + 1) : -Infinity;
     outVal = Math.max(v0, v1);
     tp = even >> 1;
-    html += '<h4>3 · Max pooling ×2</h4>';
-    html += '<div class="formula">out[' + tp + '] = max( a[' + even + '] = ' + n3(v0) +
-      ' , a[' + (even + 1) + '] = ' + n3(v1) + ' ) = <span class="res">' + n4(outVal) +
+    const nm = st.res ? 'y' : 'a';
+    html += '<h4>' + (sec++) + ' · Max pooling ×2</h4>';
+    html += '<div class="formula">out[' + tp + '] = max( ' + nm + '[' + even + '] = ' + n3(v0) +
+      ' , ' + nm + '[' + (even + 1) + '] = ' + n3(v1) + ' ) = <span class="res">' + n4(outVal) +
       '</span>  <span class="op">→ position ' + (v0 >= v1 ? even : even + 1) +
       ' wins; length drops ' + Lin + ' → ' + st.L + '</span></div>';
   }
@@ -1257,16 +1594,16 @@ function renderFilterMath(host, title, slider, sel) {
       (Math.abs(drawn - outVal) < 1e-4 ? ' ✓ matches' : ' ⚠ mismatch') + '</span></div>';
   }
 
-  /* --- 4. downstream --- */
-  html += downstreamHtml(li, ch, outVal);
+  /* --- downstream --- */
+  html += downstreamHtml(li, ch, outVal, sec);
   host.innerHTML = html;
 }
 
 /** What the network does with this filter's output next. */
-function downstreamHtml(li, ch, aVal) {
+function downstreamHtml(li, ch, aVal, sec) {
   const st = model.stages[li];
   const last = li === model.stages.length - 1;
-  let html = '<h4>' + (st.pooled ? '4' : '3') + ' · Where this value goes</h4>';
+  let html = '<h4>' + sec + ' · Where this value goes</h4>';
 
   if (!last) {
     const nx = model.stages[li + 1].conv;
@@ -1397,6 +1734,7 @@ function renderInputMath(host, title, slider) {
 
 /** Human-readable name of whatever collapses the sequence before the linear layer. */
 function headName() {
+  if (state.arch === 'mlp' || state.arch === 'kan') return 'the last hidden layer';
   if (state.arch === 'rnn') {
     return state.readout === 'mean' ? 'the mean over time'
       : state.readout === 'max' ? 'the max over time' : 'the last state';
@@ -1420,12 +1758,14 @@ function renderOutputMath(host, title, slider) {
 
   const hk = model.headKind;
   const last = model.stages[model.stages.length - 1];
-  const HEAD_LABELS = { gap: 'GAP', gmp: 'GMP', flat: 'Flatten', mean: 'mean over t', max: 'max over t', last: 'last step' };
+  const HEAD_LABELS = {
+    gap: 'GAP', gmp: 'GMP', flat: 'Flatten', mean: 'mean over t', max: 'max over t', last: 'last step', none: 'as is',
+  };
   const flat = hk === 'flat';
   setFlow(Flow.output({
     C: last.C, L: last.L, head: hk, headLabel: HEAD_LABELS[hk] || hk,
-    headTip: headName() + (flat ? ' — keeps all ' + last.C * last.L + ' numbers, position included'
-      : ' — one number per map'),
+    headTip: hk === 'none' ? 'no pooling — the last hidden layer already is a vector of ' + last.C + ' numbers'
+      : headName() + (flat ? ' — keeps all ' + last.C * last.L + ' numbers, position included' : ' — one number per map'),
     emb: !flat && model.embedding ? Array.from(model.embedding) : null,
     z: Array.from(z), p: Array.from(p), cls, trueIdx: probeInfo().trained ? state.probeLabel : -1,
   }));
@@ -1435,7 +1775,7 @@ function renderOutputMath(host, title, slider) {
     '   <span class="op">(h is the output of ' + headName() +
     ', ' + d.nin + ' numbers)</span></div>';
 
-  if (model.embedding && state.head !== 'flat') {
+  if (model.embedding && model.headKind !== 'flat') {
     html += '<div class="formula" style="margin-top:6px">h = [ ' +
       Array.from(model.embedding).map((v, i) => 'h' + i + '=' + n3(v)).join('   ') + ' ]</div>';
   }
@@ -1502,12 +1842,14 @@ function receptiveField(layerIdx) {
 function buildLayerControls() {
   const host = $('layerControls');
   host.innerHTML = '';
-  if (state.arch === 'ssm' || state.arch === 'gnn') {
+  if (state.arch === 'ssm' || state.arch === 'gnn' || state.arch === 'mlp' || state.arch === 'kan') {
+    const what = state.arch === 'mlp' ? 'units' : state.arch === 'kan' ? 'nodes' : 'channels';
     archLayers().forEach((ls) => {
       const card = document.createElement('div');
       card.className = 'laycard';
       card.innerHTML = '<div class="row"><button data-a="m">−</button><b>' + ls.units +
-        '</b><button data-a="p">+</button></div><div class="row"><span style="font-size:10px;color:#7b8794">channels</span></div>';
+        '</b><button data-a="p">+</button></div><div class="row"><span style="font-size:10px;color:#7b8794">' +
+        what + '</span></div>';
       card.querySelector('[data-a=m]').onclick = () => { if (ls.units > 1) { ls.units--; rebuildModel(); } };
       card.querySelector('[data-a=p]').onclick = () => { if (ls.units < 10) { ls.units++; rebuildModel(); } };
       host.appendChild(card);
@@ -1559,8 +1901,10 @@ function positionLayerControls() {
   for (let i = 0; i < cards.length; i++) {
     const col = layout.cols[i + 1];
     if (!col) break;
-    cards[i].style.left = col.x + 'px';
-    cards[i].style.width = NODE_W + 'px';
+    // centred on the column, which may be narrower than a card in a deep stack
+    const cw = Math.max(col.nodes[0].w, 92);
+    cards[i].style.left = (col.x + col.nodes[0].w / 2 - cw / 2) + 'px';
+    cards[i].style.width = cw + 'px';
   }
 }
 
@@ -1809,12 +2153,12 @@ function renderWmPanel() {
       '% of each batch are triggers. Changing the class set changes their labels — ' +
       'the watermark then has to be embedded again.</p>';
   }
-  if (state.arch !== 'cnn') {
+  if (state.arch === 'rnn' || state.arch === 'ssm' || state.arch === 'gnn') {
     html += '<div class="verdict no" style="margin-top:8px">⚠ <b>A sequence readout collapses the ' +
       'sequence to ' + (model ? model.finalC : '—') + ' numbers</b>, so a linear head cannot memorise ' +
       wm.T + ' arbitrary label assignments. Watermark capacity here is far lower than with the ' +
       'convolutional Flatten head — expect the verification to stay near chance.</div>';
-  } else if (state.head !== 'flat') {
+  } else if (state.arch === 'cnn' && state.head !== 'flat') {
     html += '<div class="verdict no" style="margin-top:8px">⚠ <b>This head will not carry the ' +
       'watermark.</b> Global Avg/Max Pool average the map over time, leaving only ' +
       (model ? model.finalC : '—') + ' numbers per trigger — a linear head cannot memorise ' + wm.T +
@@ -1873,10 +2217,11 @@ function bindUI() {
 
   $('layPlus').onclick = () => {
     const arr = archLayers();
-    if (arr.length >= (state.arch === 'cnn' ? 4 : 2)) return;
+    if (arr.length >= maxLayers()) return;
     const last = arr[arr.length - 1];
+    // a deep stack would pool the window away, so only the first four layers pool by default
     arr.push(state.arch === 'cnn'
-      ? { filters: last.filters, kernel: last.kernel, pool: true }
+      ? { filters: last.filters, kernel: last.kernel, pool: arr.length < 4 }
       : state.arch === 'rnn' ? { units: last.units, bidir: last.bidir }
         : { units: last.units });
     rebuildModel(); evaluate(); renderMetrics();
@@ -1892,6 +2237,11 @@ function bindUI() {
   $('archRnn').onclick = () => setArch('rnn');
   $('archSsm').onclick = () => setArch('ssm');
   $('archGnn').onclick = () => setArch('gnn');
+  $('archMlp').onclick = () => setArch('mlp');
+  $('archKan').onclick = () => setArch('kan');
+  $('residual').onchange = (e) => {
+    state.residual = e.target.checked; rebuildModel(); evaluate(); renderMetrics(); renderNet();
+  };
   $('agg').onchange = (e) => {
     state.agg = e.target.value; rebuildModel(); evaluate(); renderMetrics(); renderNet();
   };
@@ -2120,8 +2470,13 @@ function bindUI() {
       const nd = layout.cols[hit.layer + 1].nodes[hit.ch];
       const st = model.stages[hit.layer];
       const f = Math.min(1, Math.max(0, (mx - nd.x - 4) / (nd.w - 8)));
-      const tp = Math.round(f * (st.L - 1));
-      state.tPos = st.pooled ? tp * 2 : tp;
+      if (st.mlp || st.kan) {
+        // a first-layer box spans the window; deeper units have no time axis
+        if (hit.layer === 0) state.tPos = Math.round(f * (WIN - 1));
+      } else {
+        const tp = Math.round(f * (st.L - 1));
+        state.tPos = st.pooled ? tp * 2 : tp;
+      }
     } else if (hit.type === 'input') {
       const nd = layout.cols[0].nodes[0];
       const f = Math.min(1, Math.max(0, (mx - nd.x - 5) / (nd.w - 10)));

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NN Architecture Playground — power-line disturbances</title>
-<link rel="stylesheet" href="css/style.css?v=10">
+<link rel="stylesheet" href="css/style.css?v=12">
 </head>
 <body>
 
@@ -17,10 +17,12 @@
     </div>
   </div>
   <nav class="archsw" role="tablist">
+    <button id="archMlp" role="tab">MLP</button>
     <button id="archCnn" class="on" role="tab">1D CNN Playground</button>
     <button id="archRnn" role="tab">RNN Playground</button>
     <button id="archSsm" role="tab">S4 / Mamba Playground</button>
     <button id="archGnn" role="tab">GNN Playground</button>
+    <button id="archKan" role="tab">KAN</button>
   </nav>
   <div class="epochbox">
     <span class="lbl">Epoch</span>
@@ -52,7 +54,7 @@
     </select>
   </label>
 
-  <label class="ctl cnnonly"><span>Activation</span>
+  <label class="ctl actctl"><span>Activation</span>
     <select id="act">
       <option value="relu" selected>ReLU</option>
       <option value="tanh">Tanh</option>
@@ -86,6 +88,11 @@
 
   <label class="ctl cnnonly inline" style="align-self:flex-end;padding-bottom:6px">
     <input type="checkbox" id="causal"> causal (TCN)
+  </label>
+
+  <label class="ctl cnnonly inline" style="align-self:flex-end;padding-bottom:6px"
+         title="Add a skip y = f(x) + x around every layer after the first (ResNet)">
+    <input type="checkbox" id="residual"> residual (ResNet)
   </label>
 
   <label class="ctl cnnonly"><span>Output head</span>
@@ -200,6 +207,15 @@
       current example, and in the top-left corner the learned kernel itself. Link thickness is
       weight magnitude (<span class="sw pos"></span> positive, <span class="sw neg"></span>
       negative). Hover for a quick look, <b>click</b> a node for the full arithmetic below.</p>
+    <p class="hint mlponly">Each box is one hidden unit. In the first layer it shows the unit's
+      128 weights — one per sample, a fixed template laid over the window (<span class="sw pos"></span>
+      positive, <span class="sw neg"></span> negative); deeper boxes show the weights from the units
+      before. The bar at the bottom is the unit's output for this example. <b>Click</b> a unit for its
+      cell and arithmetic; in the first layer, where you click picks the input sample t.</p>
+    <p class="hint kanonly">Each box is one KAN node. In the first layer it shows φ(x<sub>i</sub>) — what
+      each of its 128 edges delivers for this example; deeper boxes draw one learned edge function per
+      input, with a red dot where this example lands. The node only adds its edges up; the bar is its
+      value. <b>Click</b> a node for its edge functions and spline coefficients.</p>
     <p class="hint rnnonly">Each box is one hidden unit — inside it is its state h<sub>t</sub>
       across the whole window, which is what a recurrent net actually computes. Link thickness is
       the size of the input weights (<span class="sw pos"></span> positive,
@@ -410,6 +426,41 @@
 </section>
 
 <footer class="notes">
+  <h3 class="mlponly">Things to try — MLP</h3>
+  <ul class="mlponly">
+    <li><b>Same task, no convolution.</b> Pick <i>Clean / Ripple</i> and run 60 epochs here and in the
+      1D CNN playground. The 2×4 CNN (118 parameters) reaches about 99% test accuracy; this MLP with 8
+      units (1,050 parameters) stays near 50% — a coin toss.</li>
+    <li><b>Why.</b> Hover a first-layer unit: its 128 weights are a template fixed to positions in the
+      window. The ripple is a small 420–900 Hz tone at a random frequency and phase, so a fixed template
+      cannot catch it wherever it sits. A CNN uses the same few weights at every position and then
+      averages — where the ripple is no longer matters.</li>
+    <li><b>Memorising instead of learning.</b> Set <i>Run for</i> to 300. Training accuracy climbs past
+      90% while test accuracy stays around 60–70%: the MLP learns the training windows, not the
+      disturbance. Watch the two loss curves drift apart.</li>
+    <li><b>Spectrum view.</b> Switch <i>Feature maps</i> to Spectrum: each first-layer box then shows
+      which frequencies its template matches.</li>
+  </ul>
+
+  <h3 class="kanonly">Things to try — KAN</h3>
+  <ul class="kanonly">
+    <li><b>Every edge is a function.</b> Hover a node in layer 2: its box draws one learned curve per
+      input, and the red dot is where the current example lands. Click it for the coefficients:
+      φ(x) = w<sub>b</sub>·silu(x) + Σ c<sub>m</sub>·B<sub>m</sub>(x), with cubic B-splines on a grid
+      of 5 intervals — 9 numbers per edge.</li>
+    <li><b>The node does nothing but add.</b> An MLP puts the nonlinearity on the node and a single
+      weight on the edge; a KAN turns that around. Compare the cell diagram of a KAN node with an
+      MLP unit.</li>
+    <li><b>Same weakness as the MLP, only stronger.</b> The first layer has a curve for every input
+      sample — 128 × 4 edges × 9 = 4,608 parameters and nothing shared across positions. On
+      <i>Clean / Ripple</i> training accuracy reaches about 98% after 300 epochs while test accuracy
+      stays near 60%.</li>
+    <li><b>The grid follows the data.</b> A first-layer node adds 128 edges, so its value can be ±40
+      — far outside a spline grid of −2 … 2. Layer 2 therefore reads its inputs standardised,
+      u = (h − μ)/σ, with μ and σ tracked during training; the shaded band in its curves is that grid
+      in the units that actually arrive.</li>
+  </ul>
+
   <h3 class="gnnonly">Things to try — GNN</h3>
   <ul class="gnnonly">
     <li><b>The graph is not given, it is built.</b> A single voltage window has no natural graph, so
@@ -478,21 +529,31 @@
       and a learning rate of 0.01 and it clears 90%.</li>
     <li>Raise the <b>background noise</b> to 0.15 and watch the gap between training and test loss
       open up — that is overfitting; push back with L2.</li>
+    <li><b>Residual (ResNet)</b> — every layer after the first adds its input back, y = f(x) + x; the
+      dashed arcs under the columns are those skips, and a filter's cell diagram shows where the skip
+      joins. Build 8 layers and compare. Do not expect a jump: at this depth a plain stack still
+      learns with Adam — the gradient reaching layer 1 is about as large with skips as without — and
+      in our runs on four classes both reached 98–100% after 40 epochs with Tanh. With ReLU the skip
+      adds a non-negative branch at every layer, so values grow with depth; residual ReLU stacks did
+      no better and at 12 layers worse, which is why real ResNets put batch normalisation in every
+      block. Skips earn their keep at dozens of layers.</li>
   </ul>
 </footer>
 
-<script src="js/signal.js?v=10"></script>
-<script src="js/fft.js?v=10"></script>
-<script src="js/nn.js?v=10"></script>
-<script src="js/rnn.js?v=10"></script>
-<script src="js/ssm.js?v=10"></script>
-<script src="js/gnn.js?v=10"></script>
-<script src="js/viz.js?v=10"></script>
-<script src="js/stream.js?v=10"></script>
-<script src="js/ood.js?v=10"></script>
-<script src="js/watermark.js?v=10"></script>
-<script src="js/quant.js?v=10"></script>
-<script src="js/flow.js?v=10"></script>
-<script src="js/main.js?v=10"></script>
+<script src="js/signal.js?v=12"></script>
+<script src="js/fft.js?v=12"></script>
+<script src="js/nn.js?v=12"></script>
+<script src="js/rnn.js?v=12"></script>
+<script src="js/ssm.js?v=12"></script>
+<script src="js/gnn.js?v=12"></script>
+<script src="js/viz.js?v=12"></script>
+<script src="js/stream.js?v=12"></script>
+<script src="js/ood.js?v=12"></script>
+<script src="js/watermark.js?v=12"></script>
+<script src="js/mlp.js?v=12"></script>
+<script src="js/kan.js?v=12"></script>
+<script src="js/quant.js?v=12"></script>
+<script src="js/flow.js?v=12"></script>
+<script src="js/main.js?v=12"></script>
 </body>
 </html>

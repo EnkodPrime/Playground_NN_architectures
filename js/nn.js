@@ -154,6 +154,34 @@ class MaxPool1D {
   }
 }
 
+/* --------------------------------------------------------- Residual block */
+/**
+ * y = f(x) + skip(x) with f = activation(conv(x)) — the ResNet idea. The skip is
+ * the identity when the channel count stays the same and a learned 1×1
+ * convolution when it changes. Its gradient reaches the input untouched, which
+ * is what lets a deep stack keep learning.
+ */
+class ResidualBlock {
+  constructor(conv, act, proj) {
+    this.type = 'res';
+    this.conv = conv; this.act = act; this.proj = proj;
+  }
+  forward(x, L) {
+    const f = this.act.forward(this.conv.forward(x, L), L);
+    const s = this.proj ? this.proj.forward(x, L) : x;
+    const out = new Float32Array(f.length);
+    for (let i = 0; i < f.length; i++) out[i] = f[i] + s[i];
+    return out;
+  }
+  backward(dout) {
+    // the skip passes the gradient on as it is; the block adds its own on top
+    const dx = this.conv.backward(this.act.backward(dout));
+    const ds = this.proj ? this.proj.backward(dout) : dout;
+    for (let i = 0; i < dx.length; i++) dx[i] += ds[i];
+    return dx;
+  }
+}
+
 /* --------------------------------------------------------- GlobalAvgPool */
 class GlobalAvgPool {
   constructor() { this.type = 'gap'; }
@@ -296,22 +324,30 @@ class ConvNet1D {
     const cfg = this.cfg;
     this.seq = [];
     this.convs = [];
+    this.projs = [];            // 1×1 convolutions on residual skips that change the width
     this.stages = [];           // metadata used by the visualisation
     let cin = 1, L = cfg.inputLen;
 
     cfg.layers.forEach((ls, i) => {
       const conv = new Conv1D(cin, ls.filters, ls.kernel, ls.dilation || 1, cfg.causal);
-      this.seq.push(conv);
       this.convs.push(conv);
       const act = new Activation(cfg.activation);
-      this.seq.push(act);
+      // the first layer is the stem: a skip from the raw signal would add little
+      const res = !!cfg.residual && i > 0;
+      let proj = null;
+      if (res) {
+        if (cin !== ls.filters) { proj = new Conv1D(cin, ls.filters, 1, 1, false); this.projs.push(proj); }
+        this.seq.push(new ResidualBlock(conv, act, proj));
+      } else {
+        this.seq.push(conv, act);
+      }
       let pooled = false;
       if (ls.pool && Math.floor(L / 2) >= 4) {
         this.seq.push(new MaxPool1D(2));
         L = Math.floor(L / 2);
         pooled = true;
       }
-      this.stages.push({ index: i, conv, C: ls.filters, L, pooled, snapshot: null });
+      this.stages.push({ index: i, conv, C: ls.filters, L, pooled, snapshot: null, res, proj });
       cin = ls.filters;
     });
 
@@ -331,7 +367,7 @@ class ConvNet1D {
     this.finalC = cin;
     this.finalL = L;
     this.seq.push(this.dense);
-    this.params = [...this.convs, this.dense];
+    this.params = [...this.convs, ...this.projs, this.dense];
   }
 
   /** Forward pass. With keepActs=true the activation maps are stored for drawing. */
@@ -339,7 +375,7 @@ class ConvNet1D {
     let a = x, L = this.cfg.inputLen, si = 0;
     for (const layer of this.seq) {
       if (layer.type === 'conv') { a = layer.forward(a, L); }
-      else if (layer.type === 'act') {
+      else if (layer.type === 'act' || layer.type === 'res') {
         a = layer.forward(a, L);
         // with no pooling after it, this activation is what the stage outputs
         const st = this.stages[si];
