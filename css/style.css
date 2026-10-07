@@ -28,8 +28,8 @@ h3{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--mute
 }
 .brand{display:flex;align-items:center;gap:12px}
 .logo{
-  font-size:26px;line-height:1;width:40px;height:40px;border-radius:10px;
-  background:rgba(255,255,255,.12);display:grid;place-items:center;color:#ffca7a;
+  width:40px;height:40px;border-radius:10px;background:#fff;padding:3px;
+  object-fit:contain;display:block;flex:none;
 }
 .topbar h1{font-size:17px;letter-spacing:.01em}
 .topbar p{margin:1px 0 0;font-size:12px;color:#b6c3cf}
