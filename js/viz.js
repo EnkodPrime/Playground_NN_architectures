@@ -1,6 +1,7 @@
 /* viz.js — draws the network, signals, spectra and metrics onto canvases. */
 
 const POS = '#f0921f';   // positive values (orange, as in TF Playground)
+const ATTN_PX = 58;      // size of the attention maps above a Transformer's encoder columns
 const INCEPTION_COLORS = ['#2b6cb0', '#2e9e5b', '#8e44ad', '#7b8794'];   // K short / mid / long / pool
 const NEG = '#0877bd';   // negative values (blue)
 const GRID = '#e3e6ea';
@@ -146,7 +147,8 @@ function layoutNetwork(model, classes, cssW, oodOn) {
   cols.forEach((c) => { totalW += c.nodes[0].w; });
   totalW += gap * (cols.length - 1);
   let x = Math.max(12, (cssW - totalW) / 2);
-  const topPad = 30;
+  // a Transformer draws its attention maps above the encoder columns
+  const topPad = model.kind === 'transformer' ? 30 + ATTN_PX + 24 : 30;
   let maxH = 0;
   cols.forEach((col) => {
     const n = col.nodes.length;
@@ -203,6 +205,20 @@ function rnnLinkStrength(stage, unit, ci) {
 function stageLink(model, li, co, ci) {
   const st = model.stages[li];
   if (st.conv) return linkStrength(st.conv, co, ci);
+  if (st.tfembed) {
+    // the patch embedding: the same 8 weights for every token
+    const E = model.embed;
+    let sum = 0, signed = 0;
+    for (let j = 0; j < E.din; j++) { const w = E.W[co * E.din + j]; sum += Math.abs(w); signed += w; }
+    return { mag: sum / E.din, sign: signed >= 0 ? 1 : -1 };
+  }
+  if (st.tflayer) {
+    // the residual stream carries every dimension straight on; attention adds W_o·W_v on top
+    const at = st.layer.attn, d = at.d;
+    let m = co === ci ? 1 : 0;
+    for (let k = 0; k < d; k++) m += at.o.W[co * d + k] * at.v.W[k * d + ci];
+    return { mag: Math.abs(m), sign: m >= 0 ? 1 : -1 };
+  }
   if (st.resblock) {
     // the block's first convolution reads input channel ci
     return linkStrength(st.block.convs[0], co, ci);
@@ -267,7 +283,7 @@ function stageLink(model, li, co, ci) {
 function stageInputCount(model, li) {
   const st = model.stages[li];
   if (st.conv) return st.conv.cin;
-  if (st.mlp || st.kan || st.resblock || st.inception) return li === 0 ? 1 : model.stages[li - 1].C;
+  if (st.mlp || st.kan || st.resblock || st.inception || st.tfembed || st.tflayer) return li === 0 ? 1 : model.stages[li - 1].C;
   if (st.ssm || st.gnn) return st.layer.D;
   return st.layer.fwd.D;
 }
@@ -354,6 +370,11 @@ function drawNetwork(ctx, o) {
       ? (narrow
         ? 'L' + (li + 1) + ' K' + st.conv.k + (st.res ? ' res' : '') + (st.pooled ? ' ↓' : '')
         : 'LAYER ' + (li + 1) + ' · K=' + st.conv.k + (st.res ? ' · res' : '') + (st.pooled ? ' · pool' : ''))
+      : st.tfembed
+        ? 'EMBED · ' + model.T + ' tokens × ' + model.d
+      : st.tflayer
+        ? (narrow ? 'E' + li : 'ENCODER ' + li + ' · ' + st.layer.attn.H + ' head' + (st.layer.attn.H > 1 ? 's' : '') +
+          (st.causal ? ' · causal' : ''))
       : st.resblock
         ? (narrow ? 'B' + (li + 1) + ' ' + st.block.kernels.join('-')
           : 'BLOCK ' + (li + 1) + ' · K ' + st.block.kernels.join('-'))
@@ -411,6 +432,40 @@ function drawNetwork(ctx, o) {
         ctx.fillText(c < st.units ? '→' : '←', nd.x + 6, nd.y + 11);
       }
     }
+  }
+
+  // attention above every encoder column, averaged over the heads (each head is in the hover view):
+  // row = token that looks, column = token it looks at
+  for (let li = 0; li < model.stages.length; li++) {
+    const st = model.stages[li];
+    if (!st.tflayer || !st.layer.trace) continue;
+    const col = cols[li + 1], A = st.layer.trace.A, T = model.T, H = st.layer.attn.H;
+    const pitch = cols[li + 2] ? cols[li + 2].x - col.x : ATTN_PX + 8;
+    const size = Math.min(ATTN_PX, pitch - 10);
+    const x0 = col.x + col.nodes[0].w / 2 - size / 2;
+    const y0 = col.nodes[0].y - 22 - size;
+    const cs = size / T;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(x0, y0, size, size);
+    for (let i = 0; i < T; i++) {
+      for (let j = 0; j < T; j++) {
+        let a = 0;
+        for (let h = 0; h < H; h++) a += A[(h * T + i) * T + j];
+        a /= H;
+        if (a <= 0) continue;
+        ctx.fillStyle = 'rgba(29,78,216,' + Math.min(1, Math.pow(a, 0.6)).toFixed(3) + ')';
+        ctx.fillRect(x0 + j * cs, y0 + i * cs, cs + 0.3, cs + 0.3);
+      }
+    }
+    ctx.strokeStyle = '#cfd6de'; ctx.lineWidth = 1;
+    ctx.strokeRect(x0, y0, size, size);
+    if (sel && sel.type === 'filter' && sel.layer === li) {   // the row of the selected token
+      ctx.strokeStyle = '#e0342b'; ctx.lineWidth = 1.4;
+      ctx.strokeRect(x0, y0 + tPosRow(o.tPos, T) * cs, size, cs);
+    }
+    ctx.fillStyle = '#98a2ad';
+    ctx.font = '9px system-ui, sans-serif';
+    ctx.fillText(H > 1 ? 'attention · mean of ' + H : 'attention', x0, y0 - 3);
   }
 
   // residual skips: y = f(x) + x, drawn under the columns they join
@@ -482,6 +537,9 @@ function drawNetwork(ctx, o) {
   drawSelectionOverlay(ctx, o);
 }
 
+/** The token row the position slider points at. */
+function tPosRow(t, T) { return Math.max(0, Math.min(T - 1, t)); }
+
 /** Marks position t: the receptive window on the inputs and the computed point. */
 function drawSelectionOverlay(ctx, o) {
   const { model, layout, sel, tPos } = o;
@@ -513,6 +571,18 @@ function drawSelectionOverlay(ctx, o) {
       span(prevCol.nodes[0], 5, WIN, tPos, tPos, 'rgba(29,78,216,0.55)');
       span(cols[1].nodes[sel.ch], 4, WIN, tPos, tPos, 'rgba(29,78,216,0.55)');
     }
+    return;
+  }
+  if (st.tfembed) {
+    // a token is one patch of 8 samples
+    span(cols[0].nodes[0], 5, WIN, tPos * TF_PATCH, tPos * TF_PATCH + TF_PATCH - 1, 'rgba(29,78,216,0.30)');
+    span(cols[1].nodes[sel.ch], 4, st.L, tPos, tPos, 'rgba(29,78,216,0.55)');
+    return;
+  }
+  if (st.tflayer) {
+    // attention reads every token — or, causal, only those up to t
+    prevCol.nodes.forEach((nd) => span(nd, inner, prevLen, 0, st.causal ? tPos : prevLen - 1, 'rgba(29,78,216,0.12)'));
+    span(cols[sel.layer + 1].nodes[sel.ch], 4, st.L, tPos, tPos, 'rgba(29,78,216,0.55)');
     return;
   }
   if (st.resblock || st.inception) {

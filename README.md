@@ -4,7 +4,7 @@ An interactive playground for neural network architectures on **signals**, in th
 [TensorFlow Playground](https://playground.tensorflow.org/) but for time series instead of 2D
 points. The task is recognising power-quality disturbances in 50 Hz mains voltage.
 
-Eight architectures share the same data, metrics and tooling, switchable at the top of the page:
+Nine architectures share the same data, metrics and tooling, switchable at the top of the page:
 
 * **MLP** — fully connected layers over the raw window, the baseline with no structure at all
 * **1D CNN** — convolutional filters over the window, optionally with residual skips
@@ -14,6 +14,7 @@ Eight architectures share the same data, metrics and tooling, switchable at the 
 * **S4 / Mamba** — state space models: S4D (diagonal, time-invariant) and a Mamba-style
   selective SSM
 * **GNN** — message passing over the visibility graph the signal builds for itself
+* **Transformer** — self-attention over 16 patches of the window, as an encoder or, causal, a decoder
 * **KAN** — a Kolmogorov–Arnold network: a learned function on every edge instead of a weight
 
 Everything runs in the browser. No dependencies, no build step, no server.
@@ -109,6 +110,17 @@ each branch answers the current example — after training on all eight classes 
 the most active for harmonics. It is the slowest of the networks to get going: the loss can sit at
 equal odds for several epochs, and about one run in five needs a reset.
 
+**Transformer.** The window is cut into 16 patches of 8 samples (2.5 ms; one 50 Hz cycle is 8 patches);
+the same linear map turns each into a token of d ∈ {4, 8, 12} numbers and a learned position vector is
+added. 1–3 pre-LN encoder layers follow — x + Attention(LN(x)), then x + FFN(LN(x)) — with 1, 2 or 4
+heads and an FFN twice as wide, then a final layer norm, the mean over the tokens and a linear layer.
+With *causal* on, a token attends only to itself and the past: the decoder form a Transformer uses on a
+stream. The attention map of every encoder layer is drawn above its column (row: the token that looks,
+column: the token it looks at), and each head on its own in the hover view; clicking follows one token
+through the layer. On an impulse, layer 1 puts three to four times an even share of every token's
+attention on the patch with the impulse. With no built-in notion of neighbouring samples it is the most
+data-hungry network here: after 40 epochs on four classes 26–66% against 85–92% for the 2×4 CNN.
+
 **KAN.** 1–3 Kolmogorov–Arnold layers of 1–10 nodes, then a linear layer to the classes. Every
 edge carries φ(x) = w_b·silu(x) + Σ c_m·B_m(x), with cubic B-splines on 5 grid intervals over
 −2 … 2 — nine numbers per edge — and the node only sums its edges. Deeper layers read their
@@ -126,8 +138,9 @@ neighbours by mean, max or sum. The inspector draws the graph as an arc diagram 
 
 All of them feed a linear layer and softmax, and are trained with **Adam** and cross-entropy plus
 optional L2. Forward and backward passes are written from scratch in `js/nn.js`, `js/rnn.js`,
-`js/ssm.js`, `js/mlp.js`, `js/kan.js` and `js/blocks.js` — convolution, residual and Inception
-blocks, group/layer normalisation, pooling, three recurrent cells, both state space variants,
+`js/ssm.js`, `js/mlp.js`, `js/kan.js`, `js/blocks.js` and `js/transformer.js` — convolution, residual
+and Inception blocks, group/layer normalisation, multi-head self-attention, pooling, three recurrent
+cells, both state space variants,
 B-spline edges, dense layer and softmax, all over flat
 `Float32Array`s indexed as `[channel * length + t]`. Every gradient,
 including the complex chain rule through `Ā` and `B̄`, agrees with numeric finite differences to
@@ -205,6 +218,7 @@ binomial test. Includes pruning and fine-tuning attacks to see how much of it su
 | `js/mlp.js` | multilayer perceptron over the raw window |
 | `js/kan.js` | Kolmogorov–Arnold layers: B-spline edges, running grid statistics |
 | `js/blocks.js` | ResNet-1D and InceptionTime: residual blocks, Inception modules, group normalisation |
+| `js/transformer.js` | patch embedding, multi-head self-attention (optionally causal), pre-LN encoder layers |
 | `js/viz.js` | layout and canvas drawing |
 | `js/stream.js` | live generator, scope and decision ribbon |
 | `js/ood.js` | novelty scores, calibration, AUC, histograms |

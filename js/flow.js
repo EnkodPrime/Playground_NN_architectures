@@ -780,6 +780,139 @@ const Flow = (() => {
       d.branches.find((b) => b.sel).name + ' branch) at t = ' + o.t + '.');
   }
 
+  /* ------------------------------------------------------ Transformer */
+  /** A token's vector of d numbers as a small bar chart; dimension hi is outlined. */
+  function vecBars(x, y, w, h, vals, hi, label, tipText) {
+    const n = vals.length;
+    let m = 1e-6;
+    for (let i = 0; i < n; i++) m = Math.max(m, Math.abs(vals[i]));
+    const bw = w / n;
+    let s = '<g class="blk">' + tip((tipText ? tipText + '\n' : '') +
+      Array.from(vals).map((v, i) => 'dim ' + (i + 1) + ' = ' + num(v, 4) + (i === hi ? '   ← selected' : '')).join('\n')) +
+      '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="4" fill="#fff" stroke="#c9d6e6"/>' +
+      '<line x1="' + x + '" x2="' + (x + w) + '" y1="' + (y + h / 2) + '" y2="' + (y + h / 2) + '" stroke="#dfe4ea"/>';
+    for (let i = 0; i < n; i++) {
+      const v = vals[i], bh = Math.abs(v) / m * (h / 2 - 3);
+      const bx = x + i * bw + bw * 0.18, bwid = bw * 0.64;
+      const by = v >= 0 ? y + h / 2 - bh : y + h / 2;
+      s += '<rect x="' + bx.toFixed(1) + '" y="' + by.toFixed(1) + '" width="' + bwid.toFixed(1) + '" height="' + Math.max(0.6, bh).toFixed(1) +
+        '" fill="' + (v >= 0 ? POS : NEG) + '"' + (i === hi ? ' stroke="#e0342b" stroke-width="1.6"' : '') + '/>';
+    }
+    if (label) s += txt(x + w / 2, y - 6, label, { size: 10.5, color: MUTED });
+    return s + '</g>';
+  }
+
+  /**
+   * One patch becomes one token.
+   * @param d { xs[8], ws[8], b, pos, sum, z, out, start }
+   * @param o { t, ch }
+   */
+  function tfEmbed(d, o) {
+    let s = '';
+    const cw = 56, x0 = 40, y = 92;
+    d.xs.forEach((xv, j) => {
+      const cx = x0 + j * (cw + 4), w = d.ws[j];
+      s += txt(cx + cw / 2, y - 26, 'x[' + (d.start + j) + ']', { size: 10, color: MUTED, mono: true });
+      s += '<g class="blk">' + tip('x[' + (d.start + j) + '] = ' + num(xv, 4) + '\nw[' + j + '] = ' + num(w, 4) + '\nproduct = ' + num(xv * w, 4)) +
+        '<rect x="' + cx + '" y="' + (y - 18) + '" width="' + cw + '" height="36" rx="4" fill="#fff" stroke="#c9d6e6"/>' +
+        txt(cx + cw / 2, y - 4, num(xv, 2), { size: 10, mono: true, color: '#5b6873' }) +
+        txt(cx + cw / 2, y + 11, '×' + num(w, 2), { size: 10, mono: true, color: signColor(w), weight: 600 }) + '</g>';
+    });
+    s += txt(x0, 36, 'patch ' + o.t + ': samples ' + d.start + '–' + (d.start + 7) + ' — the same 8 weights turn every patch into dimension ' + (o.ch + 1),
+      { size: 11, color: MUTED, anchor: 'start' });
+    const gridR = x0 + 8 * (cw + 4);
+    let x = gridR + 40;
+    s += wire([[gridR, y], [x - 14, y]]);
+    s += op(x, y, 'Σ', { tip: 'Σ of the 8 products = ' + num(d.sum, 4) });
+    s += wire([[x + 14, y], [x + 66, y]]);
+    x += 80;
+    s += wbox(x, y - 56, 'b', { w: 40, tip: 'bias = ' + num(d.b, 4) });
+    s += wire([[x, y - 42], [x, y - 14]]);
+    s += op(x, y, '+', { tip: 'Σ + b = ' + num(d.z, 4) });
+    s += wire([[x + 14, y], [x + 66, y]]);
+    x += 80;
+    s += wbox(x, y - 56, 'pos[' + o.t + ']', { w: 60, tip: 'the learned position vector of token ' + o.t + ', dimension ' + (o.ch + 1) + ' = ' + num(d.pos, 4) +
+      '\nWithout it every token would look the same wherever it sits in the window.' });
+    s += wire([[x, y - 42], [x, y - 14]]);
+    s += op(x, y, '+', { tip: 'token value = ' + num(d.z, 4) + ' + ' + num(d.pos, 4) + ' = ' + num(d.out, 4) });
+    s += wire([[x + 14, y], [x + 80, y]]);
+    s += pill(x + 47, y - 22, '', d.out, { tip: 'dimension ' + (o.ch + 1) + ' of token ' + o.t });
+    s += txt(x + 86, y + 5, 'token[' + o.t + ']', { size: 13, weight: 600, anchor: 'start' });
+    return svg(x + 170, 150, s, 'Patch embedding of token ' + o.t + ', dimension ' + (o.ch + 1) + '.');
+  }
+
+  /** How much token t attends to each of the T tokens, as bars. */
+  function attnBars(x, y, w, h, a, scores, t, causal, head) {
+    const T = a.length, bw = w / T;
+    let s = '<g class="blk">' + tip('head ' + (head + 1) + ', token ' + t + ' looks at:\n' + Array.from(a).map((v, j) =>
+      'token ' + j + ': score ' + (causal && j > t ? '— (future, masked)' : num(scores[j], 3)) + ' → weight ' + num(v, 3)).join('\n')) +
+      '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="5" fill="#fff" stroke="#c9d6e6"/>';
+    let mx = 1e-6;
+    for (let j = 0; j < T; j++) mx = Math.max(mx, a[j]);
+    for (let j = 0; j < T; j++) {
+      const bx = x + j * bw + bw * 0.15, bwid = bw * 0.7;
+      if (causal && j > t) {
+        s += '<rect x="' + bx + '" y="' + (y + 4) + '" width="' + bwid + '" height="' + (h - 8) + '" fill="#f3f5f7"/>';
+        continue;
+      }
+      const bh = a[j] / mx * (h - 10);
+      s += '<rect x="' + bx.toFixed(1) + '" y="' + (y + h - 4 - bh).toFixed(1) + '" width="' + bwid.toFixed(1) + '" height="' + Math.max(0.8, bh).toFixed(1) +
+        '" fill="' + BLUE + '"' + (j === t ? ' stroke="#e0342b" stroke-width="1.6"' : '') + '/>';
+    }
+    for (const j of [0, 4, 8, 12, T - 1]) s += txt(x + j * bw + bw / 2, y + h + 12, String(j), { size: 9, color: MUTED, mono: true });
+    s += txt(x + w / 2, y - 7, 'head ' + (head + 1) + ': how much token ' + t + ' attends to each token' + (causal ? ' (future masked)' : ''),
+      { size: 10.5, color: MUTED });
+    return s + '</g>';
+  }
+
+  /**
+   * One encoder layer at token t, following dimension ch.
+   * @param d { x, n1, a, scores, head, o, attn, h, n2, z2, out, causal }
+   * @param o { li, ch, t }
+   */
+  function attention(d, o) {
+    let s = '';
+    const ya = 110, yb = 296;
+    // row A: x → LN₁ → attention → Σ a·v → W_o → + x
+    s += vecBars(40, ya - 25, 76, 50, d.x, o.ch, 'x_t (token ' + o.t + ' in)', 'token ' + o.t + ' entering the layer');
+    s += wire([[118, ya], [146, ya]]);
+    s += gate(172, ya, 'LN₁', '', { w: 46, tip: 'layer norm over the ' + d.x.length + ' numbers of this token' });
+    s += wire([[196, ya], [226, ya]]);
+    s += attnBars(230, ya - 40, 250, 80, d.a, d.scores, o.t, d.causal, d.head);
+    s += wire([[482, ya], [516, ya]]);
+    s += op(530, ya, 'Σ', { tip: 'o_t = Σ_j a_tj · v_j — the attention-weighted average of the value vectors' });
+    s += wire([[544, ya], [566, ya]]);
+    s += vecBars(568, ya - 25, 70, 50, d.o, o.ch, 'o_t (heads joined)', 'Σ a·v of every head, side by side');
+    s += wire([[640, ya], [664, ya]]);
+    s += wbox(684, ya, 'W_o', { w: 38, tip: 'output projection: mixes the heads back into the residual stream' });
+    s += wire([[703, ya], [742, ya]]);
+    s += op(756, ya, '+', { tip: 'h = x + attention — the residual stream carries x on unchanged' });
+    s += wire([[78, ya - 25], [78, 34], [756, 34], [756, ya - 14]], { color: BLUE, dash: true });
+    s += txt(400, 28, 'residual: x is carried around the attention', { size: 10.5, color: BLUE });
+    s += wire([[770, ya], [800, ya]]);
+    s += vecBars(802, ya - 25, 70, 50, d.h, o.ch, 'h_t', 'after attention + residual');
+    // row B: h → LN₂ → FFN → + h
+    s += wire([[837, ya + 25], [837, ya + 70], [78, ya + 70], [78, yb - 27]]);
+    s += vecBars(40, yb - 25, 76, 50, d.h, o.ch, 'h_t', 'after attention + residual');
+    s += wire([[118, yb], [146, yb]]);
+    s += gate(172, yb, 'LN₂', '', { w: 46, tip: 'layer norm again, before the feed-forward net' });
+    s += wire([[196, yb], [236, yb]]);
+    s += gate(310, yb, 'W₁ → ReLU → W₂', '', { w: 146, tip: 'feed-forward net applied to every token on its own: ' + d.x.length + ' → ' +
+      (2 * d.x.length) + ' → ' + d.x.length + ' numbers' });
+    s += wire([[384, yb], [420, yb]]);
+    s += vecBars(422, yb - 25, 70, 50, d.z2, o.ch, 'FFN out', 'what the feed-forward net adds');
+    s += wire([[494, yb], [520, yb]]);
+    s += op(534, yb, '+', { tip: 'y = h + FFN — the residual stream again' });
+    s += wire([[78, yb + 25], [78, yb + 48], [534, yb + 48], [534, yb + 14]], { color: BLUE, dash: true });
+    s += wire([[548, yb], [578, yb]]);
+    s += vecBars(580, yb - 25, 76, 50, d.out, o.ch, 'y_t (token ' + o.t + ' out)', 'leaving the layer');
+    s += wire([[658, yb], [720, yb]]);
+    s += pill(689, yb - 22, 'dim ' + (o.ch + 1), d.out[o.ch], { tip: 'the value drawn in this dimension\'s box at token ' + o.t });
+    s += txt(728, yb + 5, 'out', { size: 14, weight: 600, anchor: 'start' });
+    return svg(890, yb + 64, s, 'Encoder layer ' + o.li + ', token ' + o.t + ', following dimension ' + (o.ch + 1) +
+      ' (outlined in red in every vector).');
+  }
+
   /* ------------------------------------------------------ state space */
   /**
    * @param d  stepDetail() of the selected channel
@@ -982,5 +1115,5 @@ const Flow = (() => {
       (o.trueIdx >= 0 ? ' The true class is in bold.' : ''));
   }
 
-  return { lstm, gru, rnn, conv, ssm, gnn, output, dense, kan, resblock, inception };
+  return { lstm, gru, rnn, conv, ssm, gnn, output, dense, kan, resblock, inception, tfEmbed, attention };
 })();

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NN Architecture Playground — power-line disturbances</title>
-<link rel="stylesheet" href="css/style.css?v=17">
+<link rel="stylesheet" href="css/style.css?v=21">
 </head>
 <body>
 
@@ -24,6 +24,7 @@
     <button id="archRnn" role="tab">RNN</button>
     <button id="archSsm" role="tab">S4 / Mamba</button>
     <button id="archGnn" role="tab">GNN</button>
+    <button id="archTf" role="tab">Transformer</button>
     <button id="archKan" role="tab">KAN</button>
   </nav>
   <div class="epochbox">
@@ -90,6 +91,24 @@
 
   <label class="ctl cnnonly inline" style="align-self:flex-end;padding-bottom:6px">
     <input type="checkbox" id="causal"> causal (TCN)
+  </label>
+
+  <label class="ctl tfonly"><span>Width d</span>
+    <select id="tfD">
+      <option value="4">4 per token</option><option value="8" selected>8 per token</option>
+      <option value="12">12 per token</option>
+    </select>
+  </label>
+
+  <label class="ctl tfonly"><span>Heads</span>
+    <select id="tfHeads">
+      <option value="1">1</option><option value="2" selected>2</option><option value="4">4</option>
+    </select>
+  </label>
+
+  <label class="ctl tfonly inline" style="align-self:flex-end;padding-bottom:6px"
+         title="Each token may only attend to itself and earlier tokens — the decoder (GPT) form a Transformer uses on a stream">
+    <input type="checkbox" id="tfCausal"> causal (decoder)
   </label>
 
   <label class="ctl deeponly inline" style="align-self:flex-end;padding-bottom:6px"
@@ -219,6 +238,11 @@
       current example, and in the top-left corner the learned kernel itself. Link thickness is
       weight magnitude (<span class="sw pos"></span> positive, <span class="sw neg"></span>
       negative). Hover for a quick look, <b>click</b> a node for the full arithmetic below.</p>
+    <p class="hint tfonly">The window is cut into 16 patches of 8 samples (2.5 ms); each becomes a token of d numbers.
+      Every box is one of those d dimensions across the 16 tokens. Above each encoder column is its attention map —
+      row: the token that looks, column: the token it looks at, averaged over the heads; hover a box for each head
+      on its own. <b>Click</b> a box to follow one token through attention and the feed-forward net; the slider picks
+      the token.</p>
     <p class="hint resnetonly">Each column is one residual block — three convolutions (K = 8, 5, 3 by default),
       layer norm after each, and a skip from the block input added before the last ReLU; each box is one output
       channel's map. The dashed window is everything the block can see around t. <b>Click</b> a channel for the
@@ -446,6 +470,29 @@
 </section>
 
 <footer class="notes">
+  <h3 class="tfonly">Things to try — Transformer</h3>
+  <ul class="tfonly">
+    <li><b>An impulse lights up a column.</b> Set the learning rate to 0.01, pick <i>4 classes</i> and train
+      60 epochs, then choose <i>Impulse / transient</i> in the inspector and look at the map above encoder 1:
+      every token reads the patch that holds the impulse. In our runs that patch got 0.18–0.23 of each
+      token's attention in layer 1 — three to four times an even share (1/16 = 0.06) — while for the other
+      classes the same measure stayed at about an even share.</li>
+    <li><b>What did not show up.</b> We also looked for tokens 8 apart — one 50 Hz cycle — reading each other
+      on harmonics. They did not, beyond an even share. The attention learns what helps the loss, not what
+      we expect it to.</li>
+    <li><b>It needs data.</b> A Transformer has no built-in sense of which samples are neighbours; it has to
+      learn that from positions. On these 480 windows, after 40 epochs on four classes: 26–66% at learning
+      rate 0.01 (60–79% after 60 epochs) and 40–51% at 0.003, where the 2×4 CNN with 128 parameters reached
+      85–92%; on all eight classes 19% against 50%. The same reason vision Transformers trail CNNs on small
+      datasets.</li>
+    <li><b>Encoder vs decoder.</b> Tick <i>causal</i>: the maps turn triangular, because a token may only look
+      at itself and the past — the form a Transformer uses on a stream, where the future has not arrived yet.
+      It reached 36–39% here after 40 epochs.</li>
+    <li><b>Follow one token.</b> Click a box: the cell diagram shows the token through LN, its attention over
+      all 16 tokens as bars, the weighted sum, W<sub>o</sub>, the residual, the feed-forward net and the second
+      residual; the table lists every score and weight per head.</li>
+  </ul>
+
   <h3 class="resnetonly">Things to try — ResNet-1D</h3>
   <ul class="resnetonly">
     <li><b>Normalisation is the big lever.</b> Build 3 blocks (9 convolutions), pick <i>4 classes</i>, run
@@ -596,21 +643,22 @@
   </ul>
 </footer>
 
-<script src="js/signal.js?v=17"></script>
-<script src="js/fft.js?v=17"></script>
-<script src="js/nn.js?v=17"></script>
-<script src="js/rnn.js?v=17"></script>
-<script src="js/ssm.js?v=17"></script>
-<script src="js/gnn.js?v=17"></script>
-<script src="js/viz.js?v=17"></script>
-<script src="js/stream.js?v=17"></script>
-<script src="js/ood.js?v=17"></script>
-<script src="js/watermark.js?v=17"></script>
-<script src="js/mlp.js?v=17"></script>
-<script src="js/blocks.js?v=17"></script>
-<script src="js/kan.js?v=17"></script>
-<script src="js/quant.js?v=17"></script>
-<script src="js/flow.js?v=17"></script>
-<script src="js/main.js?v=17"></script>
+<script src="js/signal.js?v=21"></script>
+<script src="js/fft.js?v=21"></script>
+<script src="js/nn.js?v=21"></script>
+<script src="js/rnn.js?v=21"></script>
+<script src="js/ssm.js?v=21"></script>
+<script src="js/gnn.js?v=21"></script>
+<script src="js/viz.js?v=21"></script>
+<script src="js/stream.js?v=21"></script>
+<script src="js/ood.js?v=21"></script>
+<script src="js/watermark.js?v=21"></script>
+<script src="js/mlp.js?v=21"></script>
+<script src="js/transformer.js?v=21"></script>
+<script src="js/blocks.js?v=21"></script>
+<script src="js/kan.js?v=21"></script>
+<script src="js/quant.js?v=21"></script>
+<script src="js/flow.js?v=21"></script>
+<script src="js/main.js?v=21"></script>
 </body>
 </html>

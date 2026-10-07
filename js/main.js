@@ -14,6 +14,10 @@ const state = {
   kanLayers: [{ units: 4 }, { units: 4 }],
   resLayers: [{ filters: 6, kernels: '8-5-3' }, { filters: 6, kernels: '8-5-3' }],
   incLayers: [{ filters: 2 }, { filters: 2 }],
+  tfLayers: [{}, {}],           // Transformer encoder layers
+  tfD: 8,                      // Transformer width: numbers per token
+  tfHeads: 2,
+  tfCausal: false,
   skip: true,                  // shortcuts in ResNet-1D and InceptionTime
   bn: true,                    // layer norm in ResNet-1D and InceptionTime
   residual: false,             // ResNet skips in the convolutional playground
@@ -117,13 +121,14 @@ function archLayers() {
   if (state.arch === 'kan') return state.kanLayers;
   if (state.arch === 'resnet') return state.resLayers;
   if (state.arch === 'inception') return state.incLayers;
+  if (state.arch === 'transformer') return state.tfLayers;
   return state.arch === 'ssm' ? state.ssmLayers : state.gnnLayers;
 }
 
 /** Most layers each playground allows. */
 function maxLayers() {
   if (state.arch === 'cnn') return 8;
-  return ['mlp', 'kan', 'resnet', 'inception'].includes(state.arch) ? 3 : 2;
+  return ['mlp', 'kan', 'resnet', 'inception', 'transformer'].includes(state.arch) ? 3 : 2;
 }
 
 function rebuildModel() {
@@ -156,6 +161,13 @@ function rebuildModel() {
       layers: JSON.parse(JSON.stringify(state.incLayers)),
       kernels: [5, 11, 23],
       bn: state.bn, skip: state.skip,
+      nClasses: activeClasses().length,
+      inputLen: WIN,
+    });
+  } else if (state.arch === 'transformer') {
+    model = new TransformerNet({
+      layers: JSON.parse(JSON.stringify(state.tfLayers)),
+      d: state.tfD, heads: state.tfHeads, causal: state.tfCausal,
       nClasses: activeClasses().length,
       inputLen: WIN,
     });
@@ -211,7 +223,7 @@ function rebuildModel() {
 /** The tab button of every playground. */
 const ARCH_TABS = {
   mlp: 'archMlp', cnn: 'archCnn', resnet: 'archRes', inception: 'archInc',
-  rnn: 'archRnn', ssm: 'archSsm', gnn: 'archGnn', kan: 'archKan',
+  rnn: 'archRnn', ssm: 'archSsm', gnn: 'archGnn', transformer: 'archTf', kan: 'archKan',
 };
 
 /** Switches between the playgrounds. */
@@ -224,6 +236,7 @@ function setArch(arch) {
   $('layerLbl').textContent = {
     cnn: 'Convolutional layers', resnet: 'Residual blocks', inception: 'Inception modules', rnn: 'Recurrent layers',
     mlp: 'Hidden layers', kan: 'KAN layers', ssm: 'State space layers', gnn: 'Message passing layers',
+    transformer: 'Encoder layers',
   }[arch];
   setStream(false);
   ood.cal = null; ood.stats = null;
@@ -587,6 +600,49 @@ function drawInspector(probs, oodInfo) {
         'collapses the state coasts and the sample is ignored. That input dependence is the ' +
         'whole point of a selective SSM — and the reason it has no fixed kernel.';
     }
+    return;
+  }
+  if (h0 && h0.type === 'filter' && model.kind === 'transformer') {
+    const st = model.stages[h0.layer], T = model.T;
+    if (st.tfembed) {
+      title('PATCH EMBEDDING — THE ' + TF_PATCH + ' WEIGHTS OF DIMENSION ' + (h0.ch + 1), 10);
+      drawKernel(ctx, 0, 14, w, 40, model.embed.W, h0.ch * TF_PATCH, TF_PATCH);
+      title('POSITION VECTOR — DIMENSION ' + (h0.ch + 1) + ' FOR EACH OF THE ' + T + ' TOKENS', 70);
+      const pv = new Float32Array(T);
+      for (let t = 0; t < T; t++) pv[t] = model.pos.W[t * model.d + h0.ch];
+      drawKernel(ctx, 0, 74, w, 40, pv, 0, T);
+      title('THIS DIMENSION ACROSS THE TOKENS, FOR THIS EXAMPLE', 128);
+      if (st.snapshot) drawWave(ctx, 0, 132, w, 32, st.snapshot, h0.ch * T, T, maxAbs(st.snapshot, 0, st.snapshot.length));
+      txt.innerHTML = '<b>Embedding, dimension ' + (h0.ch + 1) + '</b> · patches of ' + TF_PATCH + ' samples (' +
+        (TF_PATCH / SR * 1000).toFixed(1) + ' ms) → ' + T + ' tokens of ' + model.d + ' numbers' +
+        '<br>The same 8 weights turn every patch into this number — a convolution with stride 8 — and the position ' +
+        'vector is what tells the tokens apart.';
+      return;
+    }
+    const L = st.layer, H = L.attn.H, A = L.trace ? L.trace.A : null;
+    title('ATTENTION — ROW: TOKEN THAT LOOKS · COLUMN: TOKEN IT LOOKS AT', 10);
+    const size = Math.min(112, (w - (H - 1) * 8) / H), cs = size / T;
+    for (let h = 0; h < H && A; h++) {
+      const x0 = h * (size + 8);
+      ctx.fillStyle = '#fff'; ctx.fillRect(x0, 16, size, size);
+      for (let i = 0; i < T; i++) {
+        for (let j = 0; j < T; j++) {
+          const a = A[(h * T + i) * T + j];
+          if (a <= 0) continue;
+          ctx.fillStyle = 'rgba(29,78,216,' + Math.min(1, Math.pow(a, 0.6)).toFixed(3) + ')';
+          ctx.fillRect(x0 + j * cs, 16 + i * cs, cs + 0.3, cs + 0.3);
+        }
+      }
+      ctx.strokeStyle = '#cfd6de'; ctx.strokeRect(x0, 16, size, size);
+      ctx.fillStyle = '#98a2ad'; ctx.font = '9px system-ui,sans-serif';
+      ctx.fillText('head ' + (h + 1), x0, 16 + size + 10);
+    }
+    title('DIMENSION ' + (h0.ch + 1) + ' ACROSS THE TOKENS', 150);
+    if (st.snapshot) drawWave(ctx, 0, 153, w, 14, st.snapshot, h0.ch * T, T, maxAbs(st.snapshot, 0, st.snapshot.length));
+    txt.innerHTML = '<b>Encoder ' + h0.layer + ', dimension ' + (h0.ch + 1) + '</b> · ' + H + ' head' + (H > 1 ? 's' : '') + ' × ' +
+      L.attn.dh + ' · ' + (st.causal ? 'causal: a token sees only itself and the past' : 'every token sees all ' + T) +
+      '<br>Bright cells show where a token takes its information from. A bright column means every token reads that one patch; ' +
+      'stripes parallel to the diagonal mean tokens a fixed distance apart read each other.';
     return;
   }
   if (h0 && h0.type === 'filter' && model.kind === 'resnet') {
@@ -963,6 +1019,7 @@ function renderMathInner(host) {
     else if (model.kind === 'mlp') renderMlpMath(host, title, slider, sel);
     else if (model.kind === 'kan') renderKanMath(host, title, slider, sel);
     else if (model.kind === 'resnet') renderResBlockMath(host, title, slider, sel);
+    else if (model.kind === 'transformer') renderTfMath(host, title, slider, sel);
     else if (model.kind === 'inception') renderInceptionMath(host, title, slider, sel);
     else if (model.kind === 'gnn') renderGnnMath(host, title, slider, sel);
     else if (model.kind === 'ssm') renderSsmMath(host, title, slider, sel);
@@ -1337,6 +1394,148 @@ function rnnDownstreamHtml(li, unit, num) {
   }
   html += '</tbody></table></div>';
   return html;
+}
+
+/* ------------------------------------------------------------ Transformer */
+function renderTfMath(host, title, slider, sel) {
+  const li = sel.layer, ch = sel.ch;
+  const st = model.stages[li];
+  if (!st || ch >= st.C || (st.tflayer && !st.layer.trace)) { state.selected = null; return renderMathInner(host); }
+  const T = model.T, d = model.d;
+  slider.disabled = false;
+  slider.max = T - 1;
+  const t = Math.min(state.tPos, T - 1);
+  state.tPos = t;
+  slider.value = t;
+  $('tposVal').textContent = 'token ' + t + '  (' + (t * TF_PATCH / SR * 1000).toFixed(1) + '–' +
+    ((t + 1) * TF_PATCH / SR * 1000).toFixed(1) + ' ms)';
+  if (st.tfembed) return renderTfEmbedMath(host, title, st, ch, t);
+
+  const L = st.layer, tr = L.trace, at = L.attn, H = at.H, dh = at.dh;
+  const head = Math.floor(ch / dh);
+  title.textContent = 'Encoder ' + li + ' · dimension ' + (ch + 1) + ' · token ' + t + (st.causal ? ' · causal' : '');
+  const vec = (arr) => Array.from(arr.subarray(t * d, (t + 1) * d));
+  const row = (arr, h) => Array.from(arr.subarray((h * T + t) * T, (h * T + t) * T + T));
+  setFlow(Flow.attention({
+    x: vec(tr.X), n1: vec(tr.n1), a: row(tr.A, head), scores: row(tr.S, head), head, o: vec(tr.O),
+    attn: vec(tr.a), h: vec(tr.h), n2: vec(tr.n2), z2: vec(tr.z2), out: vec(tr.out), causal: st.causal,
+  }, { li, ch, t }));
+
+  let html = '<h4>1 · The encoder layer</h4>';
+  html += '<div class="formula">h = x + W<sub>o</sub>·Attention(LN<sub>1</sub>(x)) &nbsp;&nbsp; y = h + W<sub>2</sub>·ReLU(W<sub>1</sub>·LN<sub>2</sub>(h)) &nbsp;&nbsp; ' +
+    'Attention: a<sub>tj</sub> = softmax<sub>j</sub>( q<sub>t</sub>·k<sub>j</sub> / √' + dh + ' ), &nbsp; o<sub>t</sub> = Σ<sub>j</sub> a<sub>tj</sub> v<sub>j</sub></div>';
+  html += '<div class="formula" style="margin-top:6px"><span class="op">' + H + ' head' + (H > 1 ? 's' : '') + ' of ' + dh +
+    ' numbers each; q, k and v are three linear maps of the normalised token. Pre-LN, as in ViT: the norm sits inside the ' +
+    'residual branch, so x itself is carried on untouched. ' + (st.causal
+      ? 'Causal: token t may only look at tokens 0 … t — the decoder form a Transformer uses on a stream.'
+      : 'Every token may look at all ' + T + ' — the encoder form, for a whole block at once.') + '</span></div>';
+
+  html += '<h4>2 · Where token ' + t + ' looks</h4>';
+  html += '<div class="scrollx"><table class="mtab"><thead><tr><th>token j</th><th>time</th>';
+  for (let h = 0; h < H; h++) html += '<th>head ' + (h + 1) + ' score</th><th>head ' + (h + 1) + ' weight</th>';
+  html += '</tr></thead><tbody>';
+  for (let j = 0; j < T; j++) {
+    const masked = st.causal && j > t;
+    html += '<tr' + (j === t ? ' style="background:#eef4fd"' : '') + '><td class="ch">' + j + (j === t ? ' ← itself' : '') + '</td><td>' +
+      (j * TF_PATCH / SR * 1000).toFixed(1) + ' ms</td>';
+    for (let h = 0; h < H; h++) {
+      const a = tr.A[(h * T + t) * T + j], s = tr.S[(h * T + t) * T + j];
+      html += masked ? '<td class="pad">masked</td><td class="pad">0</td>'
+        : '<td>' + n3(s) + '</td><td class="sum">' + n3(a) + '</td>';
+    }
+    html += '</tr>';
+  }
+  html += '</tbody></table></div>';
+  html += '<div class="formula" style="margin-top:6px"><span class="op">score = q<sub>t</sub>·k<sub>j</sub> / √' + dh +
+    '; the weights are the softmax of the scores and add up to 1 in every head.</span></div>';
+
+  const k = ch - head * dh;
+  html += '<h4>3 · The weighted sum behind dimension ' + (ch + 1) + ' of o<sub>t</sub> (head ' + (head + 1) + ', slot ' + (k + 1) + ')</h4>';
+  html += '<div class="scrollx"><table class="mtab"><thead><tr><th>token j</th><th>weight a<sub>tj</sub></th>' +
+    '<th>value v<sub>j</sub></th><th>product</th></tr></thead><tbody>';
+  let osum = 0;
+  for (let j = 0; j < T; j++) {
+    if (st.causal && j > t) continue;
+    const a = tr.A[(head * T + t) * T + j], v = tr.V[j * d + ch];
+    osum += a * v;
+    html += '<tr><td class="ch">' + j + '</td><td>' + n3(a) + '</td><td>' + n3(v) + '</td><td class="sum">' + n4(a * v) + '</td></tr>';
+  }
+  html += '</tbody></table></div>';
+  let aout = at.o.b[ch];
+  for (let q = 0; q < d; q++) aout += at.o.W[ch * d + q] * tr.O[t * d + q];
+  html += '<div class="formula" style="margin-top:8px">o<sub>t</sub>[' + (ch + 1) + '] = Σ = <b>' + n4(osum) + '</b>  <span class="op">→</span>  ' +
+    'W<sub>o</sub> mixes all ' + d + ' numbers of o<sub>t</sub>: attention[' + (ch + 1) + '] = Σ W<sub>o</sub>[' + (ch + 1) + '][q]·o<sub>t</sub>[q] + b = <b>' +
+    n4(aout) + '</b></div>';
+
+  html += '<h4>4 · Dimension ' + (ch + 1) + ' through the layer at token ' + t + '</h4>';
+  const at_ = t * d + ch;
+  html += '<div class="scrollx"><table class="mtab"><thead><tr><th>step</th><th>value</th></tr></thead><tbody>' +
+    '<tr><td class="ch">x (in)</td><td>' + n4(tr.X[at_]) + '</td></tr>' +
+    '<tr><td class="ch">LN<sub>1</sub>(x)</td><td>' + n4(tr.n1[at_]) + '</td></tr>' +
+    '<tr><td class="ch">attention (after W<sub>o</sub>)</td><td>' + n4(tr.a[at_]) + '</td></tr>' +
+    '<tr><td class="ch">h = x + attention</td><td>' + n4(tr.h[at_]) + '</td></tr>' +
+    '<tr><td class="ch">LN<sub>2</sub>(h)</td><td>' + n4(tr.n2[at_]) + '</td></tr>' +
+    '<tr><td class="ch">FFN (W<sub>2</sub>·ReLU(W<sub>1</sub>·))</td><td>' + n4(tr.z2[at_]) + '</td></tr>' +
+    '<tr><td class="ch">y = h + FFN</td><td class="sum">' + n4(tr.out[at_]) + '</td></tr></tbody></table></div>';
+  const drawn = st.snapshot[ch * T + t];
+  html += '<div class="formula" style="margin-top:6px"><span class="op">check: the box holds ' + n4(drawn) + ' at token ' + t +
+    (Math.abs(drawn - tr.out[at_]) < 1e-4 && Math.abs(aout - tr.a[at_]) < 1e-3 && Math.abs(osum - tr.O[at_]) < 1e-4
+      ? ' ✓ matches' : ' ⚠ mismatch') + '</span></div>';
+
+  html += tfDownstreamHtml(li, ch, 5);
+  host.innerHTML = html;
+}
+
+function renderTfEmbedMath(host, title, st, ch, t) {
+  const T = model.T, d = model.d, E = model.embed, x = model.input, start = t * TF_PATCH;
+  title.textContent = 'Embedding · dimension ' + (ch + 1) + ' · token ' + t;
+  const xs = [], ws = [];
+  let sum = 0;
+  for (let j = 0; j < TF_PATCH; j++) {
+    xs.push(x[start + j]); ws.push(E.W[ch * TF_PATCH + j]);
+    sum += x[start + j] * E.W[ch * TF_PATCH + j];
+  }
+  const b = E.b[ch], pos = model.pos.W[t * d + ch], z = sum + b, out = z + pos;
+  setFlow(Flow.tfEmbed({ xs, ws, b, pos, sum, z, out, start }, { t, ch }));
+
+  let html = '<h4>1 · From patch to token</h4>';
+  html += '<div class="formula">token[' + t + '][' + (ch + 1) + '] = Σ<sub>j=0..7</sub> W<sub>e</sub>[' + (ch + 1) + '][j] · x[' + start +
+    ' + j] + b + pos[' + t + '][' + (ch + 1) + ']  <span class="op">— the same ' + TF_PATCH + ' weights for every patch, a convolution ' +
+    'with kernel 8 and stride 8; only the position vector differs</span></div>';
+  html += '<div class="scrollx" style="margin-top:8px"><table class="mtab"><thead><tr><th>j</th><th>sample</th><th>value</th>' +
+    '<th>weight</th><th>product</th></tr></thead><tbody>';
+  xs.forEach((v, j) => {
+    html += '<tr><td class="ch">' + j + '</td><td>x[' + (start + j) + ']</td><td>' + n3(v) + '</td><td style="color:' + wColor(ws[j]) + '">' +
+      n3(ws[j]) + '</td><td class="sum">' + n4(v * ws[j]) + '</td></tr>';
+  });
+  html += '</tbody></table></div>';
+  html += '<div class="formula" style="margin-top:8px">Σ = ' + n4(sum) + '  +  b ' + n4(b) + '  +  pos ' + n4(pos) +
+    '  =  <span class="res">' + n4(out) + '</span>  <span class="op">check: the box holds ' + n4(st.snapshot[ch * T + t]) +
+    (Math.abs(st.snapshot[ch * T + t] - out) < 1e-4 ? ' ✓ matches' : ' ⚠ mismatch') + '</span></div>';
+  html += tfDownstreamHtml(0, ch, 2);
+  host.innerHTML = html;
+}
+
+/** Where a token dimension goes: the next encoder layer, or the final norm, the average and the logits. */
+function tfDownstreamHtml(li, ch, sec) {
+  let html = '<h4>' + sec + ' · Where this goes</h4>';
+  if (li < model.stages.length - 1) {
+    html += '<div class="formula">This number is dimension ' + (ch + 1) + ' of the residual stream. Encoder ' + (li + 1) +
+      ' reads it through LN<sub>1</sub>, turns every token into a query, a key and a value, and adds its result back on top.</div>';
+    return html;
+  }
+  const d = model.dense, cls = activeClasses(), probs = model.probs, h = model.embedding[ch];
+  html += '<div class="formula">The final layer norm is applied to every token, then the ' + model.T + ' tokens are averaged: ' +
+    'h[' + (ch + 1) + '] = <span class="res">' + n4(h) + '</span></div>';
+  html += '<div class="scrollx" style="margin-top:8px"><table class="mtab"><thead><tr><th>class</th><th>weight to class</th>' +
+    '<th>contribution</th><th>class bias</th><th>logit (total)</th><th>softmax</th></tr></thead><tbody>';
+  for (let k = 0; k < d.nout; k++) {
+    const w = d.W[k * d.nin + ch];
+    html += '<tr><td class="ch"><span class="chip" style="background:' + cls[k].color + '"></span> ' + cls[k].name +
+      '</td><td style="color:' + wColor(w) + '">' + n3(w) + '</td><td>' + n4(w * h) + '</td><td>' + n3(d.b[k]) +
+      '</td><td>' + n3(model.logits[k]) + '</td><td class="sum">' + (probs[k] * 100).toFixed(1) + '%</td></tr>';
+  }
+  return html + '</tbody></table></div>';
 }
 
 /* ------------------------------------------- ResNet-1D and InceptionTime */
@@ -2090,6 +2289,7 @@ function renderInputMath(host, title, slider) {
 function headName() {
   if (state.arch === 'mlp' || state.arch === 'kan') return 'the last hidden layer';
   if (state.arch === 'resnet' || state.arch === 'inception') return 'Global Average Pool';
+  if (state.arch === 'transformer') return 'the mean over the ' + (model ? model.T : 16) + ' tokens';
   if (state.arch === 'rnn') {
     return state.readout === 'mean' ? 'the mean over time'
       : state.readout === 'max' ? 'the max over time' : 'the last state';
@@ -2197,6 +2397,16 @@ function receptiveField(layerIdx) {
 function buildLayerControls() {
   const host = $('layerControls');
   host.innerHTML = '';
+  if (state.arch === 'transformer') {
+    // one card for the embedding, one per encoder layer — the columns they sit above
+    ['patch ' + TF_PATCH + ' → ' + state.tfD, ...state.tfLayers.map(() => 'attention + FFN')].forEach((s) => {
+      const card = document.createElement('div');
+      card.className = 'laycard';
+      card.innerHTML = '<div class="row"><span style="font-size:10px;color:#7b8794">' + s + '</span></div>';
+      host.appendChild(card);
+    });
+    return;
+  }
   if (state.arch === 'resnet') {
     state.resLayers.forEach((ls) => {
       const card = document.createElement('div');
@@ -2548,9 +2758,9 @@ function renderWmPanel() {
       (model ? model.finalC : '—') + ' numbers per trigger — a linear head cannot memorise ' + wm.T +
       ' arbitrary label assignments. Measured: 8/20 matches with GAP against <b>20/20 with Flatten</b>. ' +
       'Switch the output head to <b>Flatten</b> to embed.</div>';
-  } else if (state.arch === 'resnet' || state.arch === 'inception') {
-    html += '<div class="verdict no" style="margin-top:8px">⚠ <b>This network ends in Global Average ' +
-      'Pooling</b>, leaving only ' + (model ? model.finalC : '—') + ' numbers per trigger — the same ' +
+  } else if (state.arch === 'resnet' || state.arch === 'inception' || state.arch === 'transformer') {
+    html += '<div class="verdict no" style="margin-top:8px">⚠ <b>This network ends in ' +
+      (state.arch === 'transformer' ? 'an average over its tokens' : 'Global Average Pooling') + '</b>, leaving only ' + (model ? model.finalC : '—') + ' numbers per trigger — the same ' +
       'bottleneck that keeps the GAP head of the 1D CNN at 8/20 matches. Expect the verification to stay low.</div>';
   }
   host.innerHTML = html;
@@ -2613,6 +2823,7 @@ function bindUI() {
       : state.arch === 'rnn' ? { units: last.units, bidir: last.bidir }
         : state.arch === 'resnet' ? { filters: last.filters, kernels: last.kernels }
           : state.arch === 'inception' ? { filters: last.filters }
+            : state.arch === 'transformer' ? {}
             : { units: last.units });
     rebuildModel(); evaluate(); renderMetrics();
   };
@@ -2626,6 +2837,20 @@ function bindUI() {
   Object.entries(ARCH_TABS).forEach(([a, id]) => { $(id).onclick = () => setArch(a); });
   $('skip').onchange = (e) => {
     state.skip = e.target.checked; rebuildModel(); evaluate(); renderMetrics(); renderNet();
+  };
+  $('tfD').onchange = (e) => {
+    state.tfD = +e.target.value;
+    // every head needs a whole share of the width
+    if (state.tfD % state.tfHeads) { state.tfHeads = 1; $('tfHeads').value = '1'; }
+    rebuildModel(); evaluate(); renderMetrics(); renderNet();
+  };
+  $('tfHeads').onchange = (e) => {
+    state.tfHeads = +e.target.value;
+    if (state.tfD % state.tfHeads) { state.tfD = 8; $('tfD').value = '8'; }
+    rebuildModel(); evaluate(); renderMetrics(); renderNet();
+  };
+  $('tfCausal').onchange = (e) => {
+    state.tfCausal = e.target.checked; rebuildModel(); evaluate(); renderMetrics(); renderNet();
   };
   $('bn').onchange = (e) => {
     state.bn = e.target.checked; rebuildModel(); evaluate(); renderMetrics(); renderNet();
