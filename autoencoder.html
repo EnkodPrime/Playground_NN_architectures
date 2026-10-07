@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Autoencoder Playground — power-line disturbances</title>
+<link rel="stylesheet" href="css/style.css?v=27">
+</head>
+<body class="ae ae-mlp">
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">∿</span>
+    <div>
+      <h1>Autoencoder Playground</h1>
+      <p>Learning what normal mains voltage looks like — no labels, in the browser</p>
+    </div>
+  </div>
+  <nav class="pagesw">
+    <a href="index.html">Classifier</a>
+    <a href="autoencoder.html" class="on">Autoencoder</a>
+  </nav>
+  <nav class="archsw" role="tablist">
+    <button data-kind="mlp" class="on" role="tab">MLP AE</button>
+    <button data-kind="conv" role="tab">Conv AE</button>
+  </nav>
+  <div class="epochbox">
+    <span class="lbl">Epoch</span>
+    <span id="epoch" class="val">000000</span><span id="epochTgt" class="tgt"></span>
+  </div>
+</header>
+
+<section class="toolbar">
+  <button id="btnPlay" class="play" title="Run / pause">▶</button>
+  <button id="btnStep" class="icon" title="One epoch">⏭</button>
+  <button id="btnReset" class="icon" title="Reset the weights">⟳</button>
+
+  <label class="ctl"><span>Run for</span>
+    <span class="epochsfield">
+      <input type="text" id="runEpochs" list="epochPresets" inputmode="numeric" placeholder="∞"
+             title="How many epochs one press of ▶ runs. Leave it empty to train until you pause.">
+      <em>epochs</em>
+    </span>
+    <datalist id="epochPresets">
+      <option value="50"></option><option value="100"></option><option value="200"></option>
+      <option value="500"></option><option value="1000"></option>
+    </datalist>
+  </label>
+
+  <label class="ctl"><span>Learning rate</span>
+    <select id="lr">
+      <option>0.0003</option><option>0.001</option><option selected>0.003</option>
+      <option>0.01</option><option>0.03</option>
+    </select>
+  </label>
+
+  <label class="ctl"><span>Batch size</span>
+    <select id="batch"><option>4</option><option>8</option><option selected>16</option><option>32</option></select>
+  </label>
+
+  <label class="ctl"><span>Code size k</span>
+    <select id="codeK" title="How many numbers the bottleneck keeps of the 128">
+      <option>1</option><option selected>2</option><option>3</option><option>4</option>
+      <option>8</option><option>16</option>
+    </select>
+  </label>
+
+  <label class="ctl ae-mlponly"><span>Hidden units</span>
+    <select id="hidden"><option>16</option><option selected>32</option><option>64</option></select>
+  </label>
+
+  <label class="ctl ae-convonly"><span>Filters</span>
+    <select id="filters"><option>2</option><option selected>4</option><option>8</option></select>
+  </label>
+
+  <label class="ctl"><span>Train on</span>
+    <select id="trainOn" title="What the autoencoder learns to rebuild">
+      <option value="clean" selected>clean mains only</option>
+      <option value="all">every checked class</option>
+    </select>
+  </label>
+
+  <label class="ctl inline" style="align-self:flex-end;padding-bottom:6px"
+         title="Feed a noisier copy and ask for the noise-free signal back">
+    <input type="checkbox" id="denoise"> denoising
+  </label>
+  <label class="ctl"><span>added noise</span>
+    <select id="dnNoise"><option>0.05</option><option selected>0.1</option><option>0.2</option></select>
+  </label>
+
+  <label class="ctl"><span>Feature maps</span>
+    <select id="mode"><option value="time" selected>Time</option><option value="freq">Spectrum</option></select>
+  </label>
+</section>
+
+<main class="grid">
+
+  <!-- ============================= DATA ============================= -->
+  <aside class="panel">
+    <h2>Data</h2>
+    <p class="hint">Windows of 128 samples (40&nbsp;ms) of 50&nbsp;Hz mains. The checked classes make up the
+      test set; with <i>Train on: clean mains only</i> the network never sees a disturbance while it learns.</p>
+    <div class="presets">
+      <button data-classes="clean,ripple,harm,spike,sag">5 classes</button>
+      <button data-classes="clean,ripple,harm,spike,sag,burst,over,under">All 8</button>
+      <button data-classes="clean,over,under">Frequency</button>
+    </div>
+    <div id="classList" class="classlist"></div>
+    <label class="slider">
+      <span>Background noise <b id="noiseVal">0.04</b></span>
+      <input type="range" id="noise" min="0" max="0.25" step="0.005" value="0.04">
+    </label>
+    <label class="slider">
+      <span>Disturbance strength <b id="strVal">1.00</b></span>
+      <input type="range" id="strength" min="0.3" max="1.6" step="0.05" value="1.0">
+    </label>
+    <label class="slider">
+      <span>Training examples <b id="ntrainVal">480</b></span>
+      <input type="range" id="ntrain" min="120" max="1200" step="60" value="480">
+    </label>
+    <button id="btnData" class="wide">Regenerate data</button>
+    <p class="hint small">The test set has 48 windows of every checked class, generated separately.</p>
+  </aside>
+
+  <div class="gutter" data-side="left" role="separator" aria-orientation="vertical" tabindex="0"
+       aria-label="Resize the Data column" title="Drag to resize · double-click to reset"></div>
+
+  <!-- ========================== ARCHITECTURE ========================== -->
+  <section class="panel center">
+    <div class="centerhead">
+      <h2>Architecture</h2>
+      <div class="layerbtns"><span class="params" id="paramCount">— parameters</span></div>
+    </div>
+    <div id="netWrap" class="netwrap">
+      <canvas id="net"></canvas>
+    </div>
+    <div id="flowBox" class="flowbox">
+      <div class="flowhead">
+        <span id="flowTitle" class="flowtitle">The whole autoencoder</span>
+        <label class="flowpos">Position <b id="flowTval">—</b>
+          <input type="range" id="flowTpos" min="0" max="127" value="64"></label>
+      </div>
+      <div id="flowBody"></div>
+    </div>
+    <p class="hint ae-mlponly">The encoder squeezes the 128 samples through a dense layer into the code — k numbers —
+      and the decoder rebuilds the window from them alone. A dense layer is drawn as one box, a bar per unit;
+      the code as one small box per number. The output box shows the reconstruction (blue) over the input (grey)
+      and the squared error underneath. <b>Click</b> anything — a unit, a code number, a sample of the output — to
+      see how it is computed.</p>
+    <p class="hint ae-convonly">The encoder halves the length three times — convolution, ReLU, max pool:
+      128 → 64 → 32 → 16 — and a dense layer turns the last maps into the code; the decoder goes back the same way,
+      repeating every value (upsampling) before each convolution. Every box is one channel's map. The output box
+      shows the reconstruction (blue) over the input (grey) and the squared error underneath. <b>Click</b> a box for
+      its arithmetic.</p>
+  </section>
+
+  <div class="gutter" data-side="right" role="separator" aria-orientation="vertical" tabindex="0"
+       aria-label="Resize the Results column" title="Drag to resize · double-click to reset"></div>
+
+  <!-- ============================ RESULTS ============================ -->
+  <aside class="panel">
+    <h2>Results</h2>
+    <div class="metrics">
+      <div><span class="lbl">Training error</span><span id="lossTrain" class="val">—</span></div>
+      <div><span class="lbl">Test error on clean mains</span><span id="lossTest" class="val red">—</span></div>
+      <div><span class="lbl">Anomaly AUC (mean)</span><span id="aucMean" class="val big">—</span></div>
+      <div id="locRow" class="hidden"><span class="lbl">Largest error on the disturbance</span><span id="locVal" class="val">—</span></div>
+      <div id="snrRow" class="hidden"><span class="lbl">Denoising SNR</span><span id="snrVal" class="val" style="font-size:11px">—</span></div>
+    </div>
+    <canvas id="loss" class="chart"></canvas>
+    <div class="legend"><span class="dot blue"></span>training <span class="dot red"></span>test (clean)</div>
+
+    <h3>Anomaly score by class</h3>
+    <div id="aucTable"></div>
+    <p class="hint small">AUC: how often a window of the class scores a larger error than a clean one — 1 is a perfect
+      detector, 0.5 a coin toss.</p>
+
+    <h3>Latent space</h3>
+    <canvas id="latent" class="chart"></canvas>
+
+    <h3>Inspector</h3>
+    <div class="probe">
+      <select id="probeClass"></select>
+      <button id="btnProbe">New example</button>
+    </div>
+    <canvas id="recon" class="chart" style="margin-top:6px"></canvas>
+    <p id="reconText" class="hint small"></p>
+  </aside>
+</main>
+
+<section class="mathpanel" id="mathPanel">
+  <div class="mathhead">
+    <h2 id="mathTitle">The whole autoencoder</h2>
+    <div class="posctl">
+      <label>Position <b id="tposVal">t = 64</b></label>
+      <input type="range" id="tpos" min="0" max="127" value="64">
+      <button id="btnClearSel">Clear selection</button>
+    </div>
+  </div>
+  <div id="mathBody" class="mathbody"></div>
+</section>
+
+<section class="oodpanel" id="sweepPanel">
+  <h2>Experiment · how many numbers does a window need?</h2>
+  <p class="hint">Trains a fresh autoencoder of the current kind for every code size k = 1, 2, 3, 4, 8, 16 and measures
+    how well it rebuilds clean mains and how well its error separates the disturbances. A clean 50 Hz window is
+    a sine of fixed frequency: amplitude and phase — two numbers — describe it.</p>
+  <div class="probe" style="max-width:520px">
+    <label class="csvopt" style="margin:0">epochs per size
+      <select id="sweepEp"><option>10</option><option selected>20</option><option>40</option></select></label>
+    <button id="btnSweep">Run the sweep</button>
+  </div>
+  <p id="sweepMsg" class="hint small"></p>
+  <div class="oodgrid">
+    <canvas id="sweepChart" class="chart"></canvas>
+    <div id="sweepTable"></div>
+  </div>
+</section>
+
+<footer class="notes">
+  <h3>Things to try</h3>
+  <ul id="notes">
+    <li>Train on clean mains only and watch the AUC table: every disturbance the decoder cannot rebuild scores high.
+      With all 8 classes, k = 2 and 40 epochs the MLP autoencoder reached a mean AUC of 0.98–0.99 over two runs,
+      the convolutional one 0.95–0.99 — without a single label.</li>
+    <li>The hardest classes are the frequency drifts (<i>over</i>, <i>under</i>): a slightly faster or slower sine is
+      still a sine, and the decoder rebuilds it almost as well (AUC 0.87–0.99 depending on the run). Spikes, sags,
+      bursts, ripple and harmonics sit at 1.00.</li>
+    <li>Pick a disturbed example in the Inspector and look at the red error band under the output: it peaks where the
+      disturbance is. For the MLP the largest error fell inside the disturbance in 97–100% of the test windows, for
+      the convolutional autoencoder in about 90%.</li>
+    <li>Set k = 2 and watch the latent space: clean windows lie on a ring — the two numbers have learned amplitude and
+      phase, the angle around the ring being the phase. With k = 1 there is no room for both: the error on clean mains
+      stays about 40 times larger and the mean AUC drops to about 0.6. Run the sweep below to see the knee.</li>
+    <li>Switch <i>Train on</i> to every checked class. The code now has to describe the disturbances as well — but at
+      k = 2 there is little room, so the mean AUC only fell to about 0.97; the drifts lose most.</li>
+    <li>Tick <i>denoising</i> with k = 8: the network gets a noisier copy and must return the clean signal. At an added
+      noise of 0.1 the MLP raised the SNR from 16.5 to 26.6 dB — better than a 5-point moving average (23.0 dB). The
+      convolutional autoencoder reached 22.2 dB, no better than the simple filter.</li>
+  </ul>
+</footer>
+
+<script src="js/signal.js?v=27"></script>
+<script src="js/fft.js?v=27"></script>
+<script src="js/nn.js?v=27"></script>
+<script src="js/rnn.js?v=27"></script>
+<script src="js/viz.js?v=27"></script>
+<script src="js/transformer.js?v=27"></script>
+<script src="js/flow.js?v=27"></script>
+<script src="js/ae-models.js?v=27"></script>
+<script src="js/ae-viz.js?v=27"></script>
+<script src="js/ui.js?v=27"></script>
+<script src="js/ae-main.js?v=27"></script>
+</body>
+</html>

@@ -464,3 +464,26 @@ details.custom textarea{
   .grid{grid-template-columns:1fr;gap:14px}
   .gutter{display:none}
 }
+
+/* ------------------------------------------------- the two playgrounds */
+.pagesw{display:flex;gap:0;background:rgba(255,255,255,.10);border-radius:9px;padding:3px}
+.pagesw a{
+  color:#c3cfda;text-decoration:none;padding:7px 14px;border-radius:7px;font-size:12.5px;font-weight:600;
+  white-space:nowrap;
+}
+.pagesw a:hover{color:#fff}
+.pagesw a.on{background:#ffca7a;color:#2f3f4f}
+
+/* ------------------------------------------------- autoencoder page */
+body.ae-mlp .ae-convonly, body.ae-conv .ae-mlponly,
+body.ae-mlp .ae-lstmonly, body.ae-conv .ae-lstmonly, body.ae-lstm .ae-mlponly, body.ae-lstm .ae-convonly,
+body.ae-mae .ae-mlponly, body.ae-mae .ae-convonly, body.ae-mae .ae-lstmonly,
+body.ae-mlp .ae-maeonly, body.ae-conv .ae-maeonly, body.ae-lstm .ae-maeonly,
+body.ae-mae .ae-notmae{display:none !important}
+.aetab{width:100%}
+.aetab td{font-size:11px}
+.aucbar{display:inline-block;width:46px;height:6px;background:#eef1f4;border-radius:3px;vertical-align:middle;overflow:hidden}
+.aucbar i{display:block;height:100%}
+
+/* anything toggled off by script */
+.hidden{display:none !important}

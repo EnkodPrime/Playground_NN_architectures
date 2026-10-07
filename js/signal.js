@@ -40,12 +40,15 @@ function ramp(x) { return 0.5 - 0.5 * Math.cos(Math.PI * Math.min(1, Math.max(0,
 /**
  * Generates one window of a given class.
  * @param {string} classId
- * @param {{noise:number, strength:number}} opt
+ * @param {{noise:number, strength:number, meta?:object}} opt  with opt.meta, the generator also
+ *        writes meta.clean (the window before the background noise) and meta.mask (1 where a
+ *        local disturbance — sag, impulse, EMI burst — sits, 0 elsewhere)
  * @returns {Float32Array} of length WIN
  */
 function generateSample(classId, opt) {
   const noise = opt.noise, strength = opt.strength;
   const x = new Float32Array(WIN);
+  const mask = opt.meta ? new Float32Array(WIN) : null;
   const A = rand(0.95, 1.05);
   const ph = rand(0, Math.PI * 2);
   // opt.f0 lets the inspector probe a grid at another fundamental while the
@@ -73,6 +76,7 @@ function generateSample(classId, opt) {
     for (let t = 0; t < WIN; t++) {
       const d = t - start;
       if (d < -edge || d > len + edge) continue;
+      if (mask) mask[t] = 1;
       let g;
       if (d < edge) g = ramp((d + edge) / (2 * edge));
       else if (d > len - edge) g = ramp((len + edge - d) / (2 * edge));
@@ -109,6 +113,7 @@ function generateSample(classId, opt) {
       const ws = 2 * Math.PI * fs / SR;
       for (let j = 0; j < 26 && pos + j < WIN; j++) {
         x[pos + j] += amp * Math.exp(-j / tau) * Math.cos(ws * j);
+        if (mask && j < 3 * tau) mask[pos + j] = 1;      // where the ringing is still visible
       }
     }
   }
@@ -120,8 +125,11 @@ function generateSample(classId, opt) {
     for (let j = 0; j < len; j++) {
       const e = Math.sin(Math.PI * j / len);
       x[start + j] += amp * e * randn();
+      if (mask) mask[start + j] = 1;
     }
   }
+
+  if (opt.meta) { opt.meta.clean = x.slice(); opt.meta.mask = mask; }
 
   // background white noise, added to every class
   if (noise > 0) for (let t = 0; t < WIN; t++) x[t] += noise * randn();

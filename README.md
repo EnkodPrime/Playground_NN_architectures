@@ -19,6 +19,10 @@ Nine architectures share the same data, metrics and tooling, switchable at the t
 
 Everything runs in the browser. No dependencies, no build step, no server.
 
+A second page, **[Autoencoder](https://enkodprime.github.io/Playground_NN_architectures/autoencoder.html)**,
+trains networks that learn what normal mains looks like without any labels — see
+[Autoencoder playground](#autoencoder-playground) below.
+
 **Live:** https://enkodprime.github.io/Playground_NN_architectures/
 
 ## Running locally
@@ -208,6 +212,45 @@ actually use.
 trigger signals with pseudo-random labels, embedded during training and verified with an exact
 binomial test. Includes pruning and fine-tuning attacks to see how much of it survives.
 
+## Autoencoder playground
+
+`autoencoder.html` squeezes the 128-sample window through a bottleneck of k numbers and rebuilds
+it from them. Trained on clean mains only, the network rebuilds normal windows well and
+everything else badly, so the reconstruction error is an anomaly score that needed no labels.
+
+* **MLP AE** — dense 128 → hidden (tanh) → k → hidden (tanh) → 128
+* **Conv AE** — three convolution + ReLU + max-pool steps (128 → 64 → 32 → 16), a dense layer to
+  the code, and back with upsampling + convolution
+
+Options: code size k (1–16), hidden units or filters, *Train on* clean mains only or every
+checked class, a **denoising** mode (noisier input, noise-free target) and the same learning rate,
+batch and *Run for* controls as the classifier. The diagram draws the encoder, the code and the
+decoder; clicking a unit, a code number or an output sample opens its arithmetic and data-flow
+diagram, and the output box shows the reconstruction over the input with the squared error
+underneath.
+
+Results panel: training and clean-test error, an **AUC per class** (how often a window of the
+class scores a larger error than a clean one), how often the largest error falls inside the
+disturbance, the denoising SNR against a moving average, and the **latent space** (the codes
+themselves for k = 2, a PCA projection otherwise). An experiment below the arithmetic panel
+retrains for k = 1, 2, 3, 4, 8, 16 and plots error and AUC against code size.
+
+Measured on all 8 classes, 40 epochs, trained on clean mains only:
+
+| | mean AUC (k = 2) | hardest classes | largest error inside the disturbance |
+|---|---|---|---|
+| MLP AE | 0.976–0.993 | over / under 0.91–0.99 | 97–100% |
+| Conv AE | 0.954–0.987 | over / under 0.87–0.88 in the weaker run | 89–90% |
+
+* At k = 2 the clean windows form a **ring** in the latent space — amplitude and phase. With k = 1
+  the clean error stays about 40 times larger and the mean AUC is about 0.6 (MLP, 20 epochs:
+  k = 1 → 0.60, 2 → 0.91, 4 → 0.99, 16 → 0.99).
+* Training on every class instead of clean only lowered the mean AUC just a little (MLP: 0.970 at
+  k = 2, 0.975 at k = 16); the frequency drifts lose most.
+* Denoising, k = 8, added noise 0.1: the MLP raised the SNR from 16.5 to 26.6 dB against 23.0 dB
+  for a 5-point moving average; the convolutional autoencoder reached 22.2 dB, no better than the
+  filter.
+
 ## Files
 
 | File | Contents |
@@ -229,6 +272,10 @@ binomial test. Includes pruning and fine-tuning attacks to see how much of it su
 | `js/quant.js` | post-training weight quantisation, bit sweep, histograms |
 | `js/main.js` | state, UI, training loop, arithmetic panel |
 | `js/flow.js` | data-flow diagrams of the selected node, drawn as SVG |
+| `js/ui.js` | layout shared by both pages: resizable columns |
+| `js/ae-models.js` | autoencoders: MLP and convolutional, upsampling, bottleneck (plain or variational) |
+| `js/ae-viz.js` | autoencoder diagram: units, code, maps and the reconstruction box |
+| `js/ae-main.js` | autoencoder page: training, AUC, localisation, latent space, code-size sweep |
 
 ## Contributing
 

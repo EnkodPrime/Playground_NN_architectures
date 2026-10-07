@@ -509,6 +509,8 @@ const Flow = (() => {
       top = 150;
     }
     const rh = 38, nRows = rowsIdx.length + (rest ? 1 : 0);
+    // a unit with only one or two inputs still needs room above for the bias
+    if (top + (nRows - 1) * rh / 2 < 84) top = 84 - (nRows - 1) * rh / 2;
     const midY = top + (nRows - 1) * rh / 2;
     const SX = 470;
     rowsIdx.forEach((i, r) => {
@@ -950,6 +952,80 @@ const Flow = (() => {
       ' (outlined in red in every vector).');
   }
 
+  /* ------------------------------------------------------ autoencoder */
+  /** A window as a small line chart: several series over the same axis, an optional marker and shading. */
+  function spark(x, y, w, h, series, o) {
+    o = o || {};
+    let m = 1e-6;
+    series.forEach((sr) => { for (let i = 0; i < sr.vals.length; i++) m = Math.max(m, Math.abs(sr.vals[i])); });
+    const n = series[0].vals.length;
+    const X = (i) => x + i * w / (n - 1), Y = (v) => y + h / 2 - v / m * (h / 2 - 3);
+    let s = '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="5" fill="#fff" stroke="#c9d6e6"/>';
+    if (o.mask) {
+      for (let i = 0; i < n; i++) {
+        if (o.mask[i]) s += '<rect x="' + (X(i) - w / n / 2).toFixed(1) + '" y="' + (y + 1) + '" width="' + (w / n + 0.4).toFixed(1) +
+          '" height="' + (h - 2) + '" fill="rgba(224,52,43,0.10)"/>';
+      }
+    }
+    s += '<line x1="' + x + '" x2="' + (x + w) + '" y1="' + (y + h / 2) + '" y2="' + (y + h / 2) + '" stroke="#e3e9f1"/>';
+    series.forEach((sr) => {
+      let d = '';
+      for (let i = 0; i < n; i++) d += (i ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(sr.vals[i]).toFixed(1);
+      s += '<path d="' + d + '" fill="none" stroke="' + sr.color + '" stroke-width="' + (sr.width || 1.3) + '"' +
+        (sr.dash ? ' stroke-dasharray="3 2"' : '') + '/>';
+    });
+    if (o.t != null) {
+      s += '<line x1="' + X(o.t) + '" x2="' + X(o.t) + '" y1="' + (y + 2) + '" y2="' + (y + h - 2) + '" stroke="#e0342b" stroke-dasharray="2 2"/>';
+    }
+    if (o.label) s += txt(x, y - 6, o.label, { size: 10.5, color: MUTED, anchor: 'start' });
+    return s;
+  }
+
+  /**
+   * The whole autoencoder for the current window: input → encoder → code → decoder →
+   * reconstruction, with the error over time and the numbers at position t.
+   * @param d { x, y, code, encLabel, decLabel, encTip, decTip, t, mse, mask, vae }
+   */
+  function aePipeline(d, o) {
+    let s = '';
+    const n = d.x.length, err = new Float32Array(n);
+    for (let i = 0; i < n; i++) err[i] = (d.x[i] - d.y[i]) * (d.x[i] - d.y[i]);
+    s += '<g class="blk">' + tip('the window going in: ' + n + ' samples') +
+      spark(24, 70, 170, 76, [{ vals: d.x, color: '#31404e' }], { t: d.t, mask: d.mask, label: 'input x (' + n + ' samples)' }) + '</g>';
+    s += wire([[196, 108], [238, 108]]);
+    s += gate(300, 108, 'encoder', '', { w: 120, tip: d.encTip });
+    s += txt(300, 146, d.encLabel, { size: 10, color: MUTED });
+    s += wire([[361, 108], [392, 108]]);
+    s += vecBars(396, 83, Math.max(40, Math.min(120, d.code.length * 14)), 50, d.code, -1,
+      'code z · k = ' + d.code.length + (d.vae ? ' (μ)' : ''), 'the bottleneck: everything the decoder gets about this window');
+    const cx = 396 + Math.max(40, Math.min(120, d.code.length * 14));
+    s += wire([[cx + 2, 108], [cx + 34, 108]]);
+    s += gate(cx + 96, 108, 'decoder', '', { w: 120, tip: d.decTip });
+    s += txt(cx + 96, 146, d.decLabel, { size: 10, color: MUTED });
+    const ox = cx + 166;
+    s += wire([[cx + 157, 108], [ox - 4, 108]]);
+    s += '<g class="blk">' + tip('grey: the input, blue: what the decoder rebuilt from the ' + d.code.length + ' numbers') +
+      spark(ox, 70, 220, 76, [{ vals: d.x, color: '#b6c0ca', width: 1.6 }, { vals: d.y, color: BLUE, width: 1.4 }],
+        { t: d.t, mask: d.mask, label: 'reconstruction x̂ (blue) over x (grey)' }) + '</g>';
+    // squared error over time, as bars
+    let m = 1e-9;
+    for (let i = 0; i < n; i++) m = Math.max(m, err[i]);
+    const ey = 168, eh = 40;
+    s += '<g class="blk">' + tip('(x − x̂)² at every sample — where the decoder could not follow') +
+      '<rect x="' + ox + '" y="' + ey + '" width="220" height="' + eh + '" rx="5" fill="#fff" stroke="#c9d6e6"/>';
+    for (let i = 0; i < n; i++) {
+      const bh = err[i] / m * (eh - 4);
+      s += '<rect x="' + (ox + i * 220 / n).toFixed(1) + '" y="' + (ey + eh - 2 - bh).toFixed(1) + '" width="' + (220 / n + 0.2).toFixed(1) +
+        '" height="' + bh.toFixed(1) + '" fill="#e0342b" opacity="0.75"/>';
+    }
+    s += '</g>' + txt(ox, ey + eh + 12, 'squared error (x − x̂)² over time', { size: 10, color: MUTED, anchor: 'start' });
+    const T = d.t;
+    s += pill(ox + 110, 40, 't = ' + T + ':  x', d.x[T], { tip: 'input at the marked position' });
+    s += pill(ox + 110, 230, 'x̂', d.y[T], { tip: 'reconstruction at the marked position' });
+    s += pill(ox - 70, 190, 'MSE', d.mse, { d: 5, tip: 'mean of the squared error over the window — the anomaly score' });
+    return svg(ox + 240, 250, s, 'The autoencoder on this window: the score is how badly it rebuilds it.');
+  }
+
   /* ------------------------------------------------------ state space */
   /**
    * @param d  stepDetail() of the selected channel
@@ -1152,5 +1228,5 @@ const Flow = (() => {
       (o.trueIdx >= 0 ? ' The true class is in bold.' : ''));
   }
 
-  return { lstm, gru, rnn, conv, ssm, gnn, output, dense, kan, resblock, inception, tfEmbed, tfConvEmbed, attention };
+  return { lstm, gru, rnn, conv, ssm, gnn, output, dense, kan, resblock, inception, tfEmbed, tfConvEmbed, attention, aePipeline, spark };
 })();
