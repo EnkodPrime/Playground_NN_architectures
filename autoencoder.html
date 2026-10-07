@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Autoencoder Playground — power-line disturbances</title>
-<link rel="stylesheet" href="css/style.css?v=30">
+<link rel="stylesheet" href="css/style.css?v=36">
 </head>
 <body class="ae ae-mlp">
 
@@ -262,6 +262,52 @@
   </div>
 </section>
 
+<section class="oodpanel" id="xpUnkPanel">
+  <h2>Experiment · autoencoder or classifier: who notices the unknown?</h2>
+  <p class="hint">Hold some classes out. A CNN classifier (three layers of 8 filters) learns the remaining classes with
+    their labels; a fresh autoencoder of the current kind learns the very same windows without them. Then both see the
+    test set, held-out classes included. A softmax always picks one of the classes it knows, so the classifier needs a
+    separate novelty score — maximum probability, energy or the distance to its training windows — while the
+    autoencoder just reports how badly it rebuilds the window.</p>
+  <div class="probe" style="flex-wrap:wrap;max-width:none;gap:10px">
+    <span class="hint small" style="margin:0">held out:</span>
+    <span id="xpUnkClasses" style="display:flex;flex-wrap:wrap;gap:8px"></span>
+    <label class="csvopt" style="margin:0">epochs
+      <select id="xpUnkEp"><option>10</option><option selected>20</option><option>40</option></select></label>
+    <button id="btnXpUnk">Train both and compare</button>
+  </div>
+  <p id="xpUnkMsg" class="hint small"></p>
+  <div id="xpUnkTable"></div>
+</section>
+
+<section class="oodpanel ae-notmae" id="xpCompPanel">
+  <h2>Experiment · the code as compression</h2>
+  <p class="hint">Instead of the 128 samples, send only the code — k numbers, each rounded to a few bits — and let the
+    receiver run the decoder. Compared with keeping every D-th sample and joining them with straight lines, and with
+    sending just the amplitude and phase of a 50 Hz sine. The error is measured against the signal without the
+    background noise. Uses the network as it is trained now.</p>
+  <div class="probe" style="max-width:520px"><button id="btnXpComp">Measure</button></div>
+  <p id="xpCompMsg" class="hint small"></p>
+  <div class="oodgrid">
+    <canvas id="xpCompChart" class="chart"></canvas>
+    <div id="xpCompTable"></div>
+  </div>
+</section>
+
+<section class="oodpanel" id="xpFewPanel">
+  <h2>Experiment · learning from a handful of labels</h2>
+  <p class="hint">The autoencoder learned without labels. Is its code a good starting point when only a few windows are
+    labelled? A logistic regression on the code of the current network against the same on the raw 128 samples and on
+    their magnitude spectrum, and a CNN trained from scratch — all with the same 1–20 labelled windows per class. Train the autoencoder on every checked
+    class first: one that has only seen clean mains has no reason to describe the disturbances.</p>
+  <div class="probe" style="max-width:520px"><button id="btnXpFew">Run</button></div>
+  <p id="xpFewMsg" class="hint small"></p>
+  <div class="oodgrid">
+    <canvas id="xpFewChart" class="chart"></canvas>
+    <div id="xpFewTable"></div>
+  </div>
+</section>
+
 <footer class="notes">
   <h3>Things to try</h3>
   <ul id="notes">
@@ -296,19 +342,38 @@
       VAE (β = 0.01) it is 98% and 93% — every random code gives a mains-like window. The price is detection: the
       mean AUC fell from 0.99 to 0.91 (MLP) and from 0.98 to 0.89 (conv). At k = 2 even the plain MLP decodes
       sines (99%): with two numbers there is nowhere else for the decoder to go.</li>
+    <li><b>Who notices the unknown?</b> With 5 classes and the sag held out (20 epochs), the autoencoder's error gave an
+      AUC of 0.78–0.84 at k = 2 and 0.93 at k = 8; the classifier's max-softmax 0.83–0.88, its energy 0.78–0.97, k-NN
+      0.43–0.61. With all 8 classes and sag + EMI burst held out, energy did best (0.76–0.92) and the autoencoder
+      reached only 0.61–0.65: having learned to rebuild spikes and ripple, it rebuilt the bursts just as well (AUC
+      0.43–0.46). An autoencoder that has to rebuild the known disturbances rebuilds much of what is new with them —
+      it is at its best when it has seen only normal data. The classifier has its own trouble here: clean, over- and
+      underfrequency look almost alike in 40 ms (52–66% accuracy with all eight).</li>
+    <li><b>Compression.</b> The MLP autoencoder with k = 2 (clean mains, 40 epochs) at 5–6 bits per number —
+      1.25–1.5 bytes a window — rebuilt clean windows at 26.1–26.6 dB, as close to the noise-free signal as sending
+      every sample (128 bytes, 25.0 dB: the background noise goes along) or every 4th (32 bytes). But sending the
+      amplitude and phase of a 50 Hz sine in 2 bytes gives 42.5 dB: when you know the signal is a sine, the model
+      written by hand wins. Over all classes the code reaches only 18 dB (every 2nd sample 23.5): what the code cannot
+      carry is the disturbance — the anomaly itself.</li>
+    <li><b>Few labels</b> — a negative result. With 8 classes, logistic regression on the code stayed at 12–33% (MLP,
+      conv and MAE, 1–20 labels per class) — no better than on the raw samples (13–27%) or a CNN from scratch (14–30%),
+      chance being 12.5%. On the magnitude spectrum it reached 49–55% with one label per class and 79% with 20. To
+      rebuild the window the code has to hold amplitude and phase — exactly what does not tell the classes apart;
+      the spectrum drops the phase by construction. The MAE's averaged tokens came closest (28–33% at 20 per class).</li>
   </ul>
 </footer>
 
-<script src="js/signal.js?v=30"></script>
-<script src="js/fft.js?v=30"></script>
-<script src="js/nn.js?v=30"></script>
-<script src="js/rnn.js?v=30"></script>
-<script src="js/viz.js?v=30"></script>
-<script src="js/transformer.js?v=30"></script>
-<script src="js/flow.js?v=30"></script>
-<script src="js/ae-models.js?v=30"></script>
-<script src="js/ae-viz.js?v=30"></script>
-<script src="js/ui.js?v=30"></script>
-<script src="js/ae-main.js?v=30"></script>
+<script src="js/signal.js?v=36"></script>
+<script src="js/fft.js?v=36"></script>
+<script src="js/nn.js?v=36"></script>
+<script src="js/rnn.js?v=36"></script>
+<script src="js/viz.js?v=36"></script>
+<script src="js/transformer.js?v=36"></script>
+<script src="js/flow.js?v=36"></script>
+<script src="js/ae-models.js?v=36"></script>
+<script src="js/ae-viz.js?v=36"></script>
+<script src="js/ui.js?v=36"></script>
+<script src="js/ae-main.js?v=36"></script>
+<script src="js/ae-experiments.js?v=36"></script>
 </body>
 </html>

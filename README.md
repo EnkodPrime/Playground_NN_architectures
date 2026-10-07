@@ -266,6 +266,26 @@ The MAE has no code size; its row is for 50% of the patches hidden in training.
   for a 5-point moving average; the convolutional autoencoder reached 22.2 dB, no better than the
   filter.
 
+### Experiments
+
+Three panels below the autoencoder reuse whatever network is selected:
+
+* **Autoencoder or classifier** — hold out some classes; a CNN learns the rest with labels and a
+  fresh autoencoder the same windows without them; AUC of known vs held-out test windows for the
+  reconstruction error and for the classifier's max-softmax, energy and k-NN scores. Five classes
+  with the sag held out: autoencoder 0.78–0.84 at k = 2 and 0.93 at k = 8, energy 0.78–0.97,
+  max-softmax 0.83–0.88. All eight with sag + EMI burst held out: energy 0.76–0.92, autoencoder
+  0.61–0.65 — trained to rebuild the known disturbances, it rebuilds the bursts as well.
+* **Compression** — the code quantised to 2–12 bits per number against keeping every D-th
+  sample and against a 2-byte 50 Hz sine fit, as SNR to the noise-free signal. k = 2 at 1.25–1.5
+  bytes: 26.1–26.6 dB on clean mains, as good as all 128 samples (25.0 dB, noise included); the
+  sine fit: 42.5 dB. Over all classes the code reaches 18 dB — the disturbance is what it drops.
+* **Few labels** — logistic regression on the code, on the raw samples and on the magnitude
+  spectrum, and a CNN from scratch, with 1–20 labelled windows per class. A negative result: on
+  8 classes the learned codes stayed at 12–33%, the spectrum reached 49–55% with one label per
+  class and 79% with 20. The code spends its numbers on amplitude and phase, which do not
+  identify the class.
+
 ## Files
 
 | File | Contents |
@@ -291,6 +311,7 @@ The MAE has no code size; its row is for 50% of the patches hidden in training.
 | `js/ae-models.js` | autoencoders: MLP, convolutional, LSTM / GRU sequence to sequence, masked Transformer; upsampling, bottleneck (plain or variational) |
 | `js/ae-viz.js` | autoencoder diagram: units, code, maps, state and token heatmaps, attention, the reconstruction box |
 | `js/ae-main.js` | autoencoder page: training, AUC, localisation, latent space, generation, code-size sweep |
+| `js/ae-experiments.js` | unknown classes against a classifier, compression, few labels |
 
 ## Contributing
 
